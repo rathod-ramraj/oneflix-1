@@ -1,0 +1,31 @@
+{
+  "name": "streamapp",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "client": "vite",
+    "server": "node backend/server.js",
+    "build": "vite build",
+    "start": "node backend/server.js",
+    "preview": "vite preview",
+    "build:vercel": "vite build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.0",
+    "framer-motion": "^12.39.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.0",
+    "concurrently": "^9.0.0",
+    "vite": "^5.4.0"
+  }
+}

@@ -1,0 +1,28 @@
+# Render Blueprint — StreamApp API (backend only)
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: streamapp-api
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: node backend/server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: SERVE_STATIC
+        value: "false"
+      - key: FRONTEND_URL
+        sync: false
+      - key: OMDB_API_KEY
+        sync: false
+      - key: TMDB_API_KEY
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+        optional: true
+      - key: UNSPLASH_ACCESS_KEY
+        sync: false
+        optional: true
