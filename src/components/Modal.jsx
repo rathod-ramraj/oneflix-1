@@ -1,13 +1,20 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { getPoster, getBackdrop, fetchEpisodes, fetchTvSeasons, fetchMovie } from '../utils/api';
+import { getPoster, getBackdrop, fetchEpisodes, fetchTvSeasons, fetchMovie, fetchTrailer } from '../utils/api';
+import { isInMyList, toggleMyList } from '../utils/myList';
 
-export default function Modal({ movie, onClose, onPlay }) {
+import { useMediaQuery } from '../utils/useMedia';
+
+export default function Modal({ movie, onClose, onPlay, onMyListChange, showToast }) {
+  const isMobile = useMediaQuery('(max-width: 768px)');
   const [detail, setDetail] = useState(movie);
   const [episodes, setEpisodes] = useState([]);
   const [season, setSeason] = useState(1);
   const [seasonsMeta, setSeasonsMeta] = useState([]);
   const [loadingEps, setLoadingEps] = useState(false);
+  const [inList, setInList] = useState(() => isInMyList(movie));
+  const [trailer, setTrailer] = useState(null);
+  const [showTrailer, setShowTrailer] = useState(false);
 
   useEffect(() => {
     const handler = (e) => { if (e.key === 'Escape') onClose(); };
@@ -23,8 +30,20 @@ export default function Modal({ movie, onClose, onPlay }) {
     if (!movie?.imdbId) return;
     setDetail(movie);
     setSeason(1);
+    setInList(isInMyList(movie));
+    setShowTrailer(false);
+    setTrailer(null);
     fetchMovie(movie.imdbId).then((d) => setDetail((prev) => ({ ...prev, ...d }))).catch(() => {});
+    fetchTrailer(movie.imdbId).then(setTrailer).catch(() => setTrailer(null));
   }, [movie]);
+
+  const handleMyList = () => {
+    const added = !isInMyList(detail);
+    toggleMyList(detail);
+    setInList(added);
+    onMyListChange?.();
+    showToast?.(added ? 'Added to My List' : 'Removed from My List');
+  };
 
   useEffect(() => {
     if (detail?.type !== 'tv' || !detail?.imdbId) return;
@@ -62,22 +81,54 @@ export default function Modal({ movie, onClose, onPlay }) {
         <motion.div
           className="modal-box glass-dark"
           onClick={(e) => e.stopPropagation()}
-          initial={{ opacity: 0, scale: 0.92, y: 40 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.95, y: 20 }}
-          transition={{ type: 'spring', damping: 26, stiffness: 320 }}
+          initial={isMobile ? { opacity: 0, y: '100%' } : { opacity: 0, scale: 0.92, y: 40 }}
+          animate={isMobile ? { opacity: 1, y: 0 } : { opacity: 1, scale: 1, y: 0 }}
+          exit={isMobile ? { opacity: 0, y: '100%' } : { opacity: 0, scale: 0.95, y: 20 }}
+          transition={isMobile ? { type: 'spring', damping: 32, stiffness: 380 } : { type: 'spring', damping: 26, stiffness: 320 }}
         >
           <button type="button" className="modal-close" onClick={onClose}>✕</button>
 
           <motion.div className="modal-hero">
-            <img src={getBackdrop(detail) || poster} alt={title} />
-            <motion.div className="modal-hero-gradient" />
+            {showTrailer && trailer?.embedUrl ? (
+              <iframe
+                className="modal-trailer-embed"
+                src={`${trailer.embedUrl}&autoplay=1`}
+                title={`${title} trailer`}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowFullScreen
+              />
+            ) : (
+              <img src={getBackdrop(detail) || poster} alt={title} />
+            )}
+            {!showTrailer && <motion.div className="modal-hero-gradient" />}
             <motion.div className="modal-hero-content">
-              <h2 className="modal-title">{title.toUpperCase()}</h2>
+              {!showTrailer && <h2 className="modal-title">{title.toUpperCase()}</h2>}
               <motion.div className="modal-actions">
-                <button type="button" className="btn-play" onClick={() => onPlay(detail, { season: 1, episode: 1 })}>▶ Play</button>
-                <button type="button" className="btn-icon-round glass">+</button>
-                <button type="button" className="btn-icon-round glass">👍</button>
+                {!showTrailer && (
+                  <button type="button" className="btn-play" onClick={() => onPlay(detail, { season: 1, episode: 1 })}>▶ Play</button>
+                )}
+                {trailer && (
+                  <button
+                    type="button"
+                    className={showTrailer ? 'btn-play' : 'btn-info'}
+                    onClick={() => setShowTrailer((v) => !v)}
+                  >
+                    {showTrailer ? '◀ Back' : '▶ Trailer'}
+                  </button>
+                )}
+                {!showTrailer && (
+                  <>
+                    <button
+                      type="button"
+                      className={`btn-icon-round glass${inList ? ' active' : ''}`}
+                      onClick={handleMyList}
+                      aria-label={inList ? 'Remove from My List' : 'Add to My List'}
+                    >
+                      {inList ? '✓' : '+'}
+                    </button>
+                    <button type="button" className="btn-icon-round glass">👍</button>
+                  </>
+                )}
               </motion.div>
             </motion.div>
           </motion.div>

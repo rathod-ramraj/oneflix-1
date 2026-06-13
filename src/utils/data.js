@@ -4,7 +4,6 @@ export const NAV_ITEMS = [
   { id: 'movies', label: 'Movies' },
   { id: 'games', label: 'Games' },
   { id: 'livetv', label: 'LiveTV', href: 'https://playup.vercel.app/' },
-  { id: 'torrents', label: 'Torrents' },
   { id: 'anime', label: 'Anime', href: 'https://animexploree.vercel.app/' },
   { id: 'mylist', label: 'My List' },
   { id: 'languages', label: 'Browse by Languages' },

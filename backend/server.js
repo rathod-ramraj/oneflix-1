@@ -14,11 +14,14 @@ import {
   enrichPoster,
   searchLocalCatalog,
   mergeSearchResults,
+  searchTmdbAll,
   PLACEHOLDER,
 } from './omdbService.js';
 import { searchImdbApi, fetchImdbApiById } from './imdbApiService.js';
-import { resolveImages } from './imageService.js';
-import { buildStreamProviders, ALLOWED_EMBED_HOSTS } from './streamProviders.js';
+import { resolveImages, enrichSearchResults, probeImageUrl } from './imageService.js';
+import { buildStreamProviders, ALLOWED_EMBED_HOSTS, probeProviderUrl, isAllowedProviderUrl } from './streamProviders.js';
+import { isBotRequest, BOT_BLOCK_MESSAGE } from './botGuard.js';
+import { fetchYoutubeTrailer } from './youtubeService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -28,6 +31,22 @@ const PORT = process.env.PORT || 3001;
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 const OMDB_API_KEY = process.env.OMDB_API_KEY || '';
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY || '';
+const UNSPLASH_APPLICATION_ID = process.env.UNSPLASH_APPLICATION_ID || '';
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
+
+function imageOpts() {
+  return {
+    tmdbKey: TMDB_API_KEY,
+    omdbKey: OMDB_API_KEY,
+    unsplashKey: UNSPLASH_ACCESS_KEY,
+    unsplashAppId: UNSPLASH_APPLICATION_ID,
+  };
+}
+
+async function withImages(movie) {
+  if (!movie) return movie;
+  return resolveImages(movie, imageOpts());
+}
 
 const moviesPath = path.join(__dirname, 'movies.json');
 let movies = [];
@@ -57,6 +76,12 @@ app.use(
   }),
 );
 app.use(express.json());
+
+app.use((req, res, next) => {
+  if (req.path === '/api/health' || req.path.startsWith('/api/')) return next();
+  if (!isBotRequest(req)) return next();
+  res.status(403).type('text/plain').send(BOT_BLOCK_MESSAGE);
+});
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'streamapp-api' });
@@ -126,7 +151,7 @@ async function resolveMovie(id) {
   return null;
 }
 
-/** Fast search: local + imdbapi.dev (+ OMDb fallback when relevance is low) */
+/** Fast search: local + TMDB + imdbapi (+ OMDb fallback) */
 app.get('/api/search', async (req, res) => {
   const q = (req.query.q || '').trim();
   const maxPages = Math.min(parseInt(req.query.pages, 10) || 10, 15);
@@ -134,13 +159,16 @@ app.get('/api/search', async (req, res) => {
   if (!q) return res.json({ results: [], total: 0 });
 
   try {
+    loadMovies();
     const localHits = searchLocalCatalog(movies, q);
 
-    const [imdbSettled, omdbSettled] = await Promise.allSettled([
+    const [tmdbSettled, imdbSettled, omdbSettled] = await Promise.allSettled([
+      TMDB_API_KEY ? searchTmdbAll(TMDB_API_KEY, q, maxPages) : Promise.resolve([]),
       searchImdbApi(q),
       OMDB_API_KEY ? searchOmdbAll(OMDB_API_KEY, q, maxPages) : Promise.resolve([]),
     ]);
 
+    const tmdbHits = tmdbSettled.status === 'fulfilled' ? tmdbSettled.value : [];
     const imdbHits =
       imdbSettled.status === 'fulfilled'
         ? imdbSettled.value.results || []
@@ -148,6 +176,9 @@ app.get('/api/search', async (req, res) => {
     const omdbHits =
       omdbSettled.status === 'fulfilled' ? omdbSettled.value : [];
 
+    if (tmdbSettled.status === 'rejected') {
+      console.warn('[search] tmdb:', tmdbSettled.reason?.message);
+    }
     if (imdbSettled.status === 'rejected') {
       console.warn('[search] imdbapi:', imdbSettled.reason?.message);
     }
@@ -155,13 +186,24 @@ app.get('/api/search', async (req, res) => {
       console.warn('[search] omdb:', omdbSettled.reason?.message);
     }
 
-    const remoteHits = mergeSearchResults([], [...imdbHits, ...omdbHits], q);
+    const remoteHits = mergeSearchResults(
+      mergeSearchResults(tmdbHits, imdbHits, q),
+      omdbHits,
+      q,
+    );
     const merged = mergeSearchResults(localHits, remoteHits, q);
+    const enhanced = await enrichSearchResults(merged, { tmdbKey: TMDB_API_KEY }, 36);
+
     res.json({
-      results: merged,
-      total: merged.length,
+      results: enhanced,
+      total: enhanced.length,
       source: 'all',
-      counts: { local: localHits.length, imdbapi: imdbHits.length, omdb: omdbHits.length },
+      counts: {
+        local: localHits.length,
+        tmdb: tmdbHits.length,
+        imdbapi: imdbHits.length,
+        omdb: omdbHits.length,
+      },
     });
   } catch (err) {
     console.error('[search]', err);
@@ -177,7 +219,7 @@ app.get('/api/movies', (_req, res) => {
 app.get('/api/movie/:id', async (req, res) => {
   const movie = await resolveMovie(req.params.id);
   if (!movie) return res.status(404).json({ error: 'Movie not found' });
-  res.json(movie);
+  res.json(await withImages(movie));
 });
 
 app.get('/api/stream/:id', async (req, res) => {
@@ -193,19 +235,6 @@ app.get('/api/stream/:id', async (req, res) => {
 
 const HERO_EXCLUDE_IDS = new Set(['tt4154796']);
 const BAD_IMAGE_MARKERS = ['1M876Kj8', 'dGfq6e6U7R4i', '6rd4x5uHfR7'];
-const SPOTLIGHT_TITLES = [
-  'Stranger Things',
-  'Dhurandhar The Revenge (2026)',
-  'From',
-  'Game of Thrones',
-  'The Dark Knight',
-  'Breaking Bad',
-  'The Last of Us',
-  'Oppenheimer',
-  'Interstellar',
-  'Wednesday',
-  'The Boys',
-];
 
 function isHeroExcluded(movie) {
   return !movie || HERO_EXCLUDE_IDS.has(movie.imdbId) || movie.title === 'Avengers: Endgame';
@@ -219,10 +248,6 @@ function hasValidImage(movie) {
 
 function activeCatalog() {
   return movies.filter((m) => hasValidImage(m));
-}
-
-function byTitle(titles) {
-  return titles.map((t) => movies.find((m) => m.title === t)).filter((m) => hasValidImage(m));
 }
 
 function rotateSeed() {
@@ -245,17 +270,37 @@ function pickMovies(pool, count, seed) {
   return seededShuffle(pool, seed).slice(0, Math.min(count, pool.length));
 }
 
+function parseYear(movie) {
+  const match = String(movie?.year || '').match(/\d{4}/);
+  return match ? parseInt(match[0], 10) : 0;
+}
+
+function latestHeroCandidates() {
+  const cutoff = new Date().getFullYear() - 2;
+  return activeCatalog()
+    .filter(
+      (m) =>
+        !isHeroExcluded(m) &&
+        m.backdrop &&
+        m.backdrop !== 'N/A' &&
+        (m.recent || parseYear(m) >= cutoff)
+    )
+    .sort((a, b) => {
+      const yr = parseYear(b) - parseYear(a);
+      if (yr !== 0) return yr;
+      if (a.recent && !b.recent) return -1;
+      if (b.recent && !a.recent) return 1;
+      return parseFloat(b.rating || 0) - parseFloat(a.rating || 0);
+    });
+}
+
 function buildHeroPool(seed) {
   const featured =
     movies.find((m) => m.featured && hasValidImage(m) && !isHeroExcluded(m)) ||
-    movies.find((m) => m.title === 'Stranger Things');
-  const spotlight = byTitle(SPOTLIGHT_TITLES).filter((m) => !isHeroExcluded(m));
-  const rest = pickMovies(
-    spotlight.filter((m) => m.imdbId !== featured?.imdbId),
-    11,
-    seed
-  );
-  const pool = featured ? [featured, ...rest] : spotlight.slice(0, 12);
+    movies.find((m) => m.imdbId === 'tt37287335');
+  const latest = latestHeroCandidates().filter((m) => m.imdbId !== featured?.imdbId);
+  const rest = pickMovies(latest, 11, seed);
+  const pool = featured ? [featured, ...rest] : pickMovies(latest, 12, seed);
   return [...new Map(pool.map((m) => [m.imdbId, m])).values()];
 }
 
@@ -264,62 +309,102 @@ function genreMovies(genreNeedle, type = 'movie') {
   return activeCatalog().filter((m) => m.type === type && (m.genre || '').toLowerCase().includes(needle));
 }
 
-app.get('/api/rows', (_req, res) => {
-  loadMovies();
-  const seed = rotateSeed();
-  const catalog = activeCatalog();
-  const featureFilms = catalog.filter((m) => m.type === 'movie');
-  const tvShows = catalog.filter((m) => m.type === 'tv');
-  const indianPool = featureFilms.filter((m) =>
-    ['Jawan', 'Pathaan', 'Animal', 'RRR', 'KGF', 'Vikram', 'Leo', 'Pushpa', 'Kantara', 'Dhurandhar'].some((k) =>
-      (m.title || '').includes(k)
-    )
-  );
-  const heroPool = buildHeroPool(seed);
-  const hero = heroPool[0] || catalog[0] || null;
+let rowsPayloadCache = { data: null, at: 0 };
+const ROWS_API_CACHE_MS = 60_000;
 
-  const topRated = [...featureFilms].sort((a, b) => parseFloat(b.rating || 0) - parseFloat(a.rating || 0));
+app.get('/api/rows', async (_req, res) => {
+  try {
+    const now = Date.now();
+    if (rowsPayloadCache.data && now - rowsPayloadCache.at < ROWS_API_CACHE_MS) {
+      res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+      return res.json(rowsPayloadCache.data);
+    }
 
-  const rows = [
+    loadMovies();
+    const seed = rotateSeed();
+    const catalog = activeCatalog();
+    const featureFilms = catalog.filter((m) => m.type === 'movie');
+    const tvShows = catalog.filter((m) => m.type === 'tv');
+    const indianPool = featureFilms.filter((m) =>
+      ['Jawan', 'Pathaan', 'Animal', 'RRR', 'KGF', 'Vikram', 'Leo', 'Pushpa', 'Kantara', 'Dhurandhar'].some((k) =>
+        (m.title || '').includes(k)
+      )
+    );
+    const heroPool = buildHeroPool(seed);
+    const hero = heroPool[0] || catalog[0] || null;
+
+    const topRated = [...featureFilms].sort((a, b) => parseFloat(b.rating || 0) - parseFloat(a.rating || 0));
+
+    const rows = [
     { id: 'top10', title: 'Top 10 Movies Today', variant: 'top10', movies: pickMovies(featureFilms, 10, seed + 10) },
-    { id: 'trending', title: 'Trending Now', movies: pickMovies(featureFilms, 10, seed + 20) },
-    { id: 'toprated', title: 'Top Rated Movies', movies: pickMovies(topRated, 10, seed + 30) },
-    { id: 'indian', title: 'Indian Blockbusters', movies: pickMovies(indianPool.length ? indianPool : featureFilms, 10, seed + 40) },
-    { id: 'tv', title: 'Popular TV Shows', movies: pickMovies(tvShows, 12, seed + 50) },
-    { id: 'recent', title: 'Recently Added', movies: pickMovies(movies.filter((m) => m.recent).length ? movies.filter((m) => m.recent) : featureFilms, 12, seed + 60) },
-    { id: 'drama', title: 'Drama Movies', movies: pickMovies(genreMovies('drama').length ? genreMovies('drama') : featureFilms, 10, seed + 70) },
-    { id: 'scifi', title: 'Sci-Fi Movies', variant: 'landscape', explore: true, movies: pickMovies(genreMovies('sci').length ? genreMovies('sci') : featureFilms, 10, seed + 80) },
-    { id: 'horror', title: 'Horror Movies', movies: pickMovies(genreMovies('horror').length ? genreMovies('horror') : featureFilms, 10, seed + 90) },
-    { id: 'action', title: 'Action & Thrillers', movies: pickMovies(genreMovies('action').length ? genreMovies('action') : featureFilms, 10, seed + 100) },
-    { id: 'blockbuster', title: 'Hollywood Blockbusters', movies: pickMovies(featureFilms.filter((m) => !indianPool.includes(m)), 10, seed + 110) },
-    { id: 'comedy', title: 'Comedy Movies', movies: pickMovies(genreMovies('comedy').filter((m) => hasValidImage(m)).length ? genreMovies('comedy').filter((m) => hasValidImage(m)) : featureFilms, 10, seed + 120) },
-  ];
+    { id: 'trending', title: 'Trending Now', movies: pickMovies(featureFilms, 20, seed + 20) },
+    { id: 'toprated', title: 'Top Rated Movies', movies: pickMovies(topRated, 20, seed + 30) },
+    { id: 'indian', title: 'Indian Blockbusters', movies: pickMovies(indianPool.length ? indianPool : featureFilms, 18, seed + 40) },
+    { id: 'tv', title: 'Popular TV Shows', movies: pickMovies(tvShows, 20, seed + 50) },
+    { id: 'recent', title: 'Recently Added', movies: pickMovies(movies.filter((m) => m.recent).length ? movies.filter((m) => m.recent) : featureFilms, 18, seed + 60) },
+    { id: 'drama', title: 'Drama Movies', movies: pickMovies(genreMovies('drama').length ? genreMovies('drama') : featureFilms, 18, seed + 70) },
+    { id: 'scifi', title: 'Sci-Fi Movies', variant: 'landscape', explore: true, movies: pickMovies(genreMovies('sci').length ? genreMovies('sci') : featureFilms, 18, seed + 80) },
+    { id: 'horror', title: 'Horror Movies', movies: pickMovies(genreMovies('horror').length ? genreMovies('horror') : featureFilms, 18, seed + 90) },
+    { id: 'action', title: 'Action & Thrillers', movies: pickMovies(genreMovies('action').length ? genreMovies('action') : featureFilms, 18, seed + 100) },
+    { id: 'blockbuster', title: 'Hollywood Blockbusters', movies: pickMovies(featureFilms.filter((m) => !indianPool.includes(m)), 18, seed + 110) },
+    { id: 'comedy', title: 'Comedy Movies', movies: pickMovies(genreMovies('comedy').filter((m) => hasValidImage(m)).length ? genreMovies('comedy').filter((m) => hasValidImage(m)) : featureFilms, 18, seed + 120) },
+    { id: 'crime', title: 'Crime & Mystery', movies: pickMovies(genreMovies('crime').length ? genreMovies('crime') : featureFilms, 18, seed + 130) },
+    { id: 'romance', title: 'Romance & Drama', movies: pickMovies(genreMovies('romance').length ? genreMovies('romance') : featureFilms, 18, seed + 140) },
+    { id: 'animation', title: 'Animation & Family', movies: pickMovies(genreMovies('animation').length ? genreMovies('animation') : featureFilms, 18, seed + 150) },
+    { id: 'fantasy', title: 'Fantasy & Adventure', movies: pickMovies(genreMovies('fantasy').length ? genreMovies('fantasy') : featureFilms, 18, seed + 160) },
+    { id: 'marvel', title: 'Superhero Universe', movies: pickMovies(featureFilms.filter((m) => /avengers|iron man|black panther|guardians|spider-man|batman|joker|deadpool/i.test(m.title || '')), 18, seed + 170) },
+    { id: 'binge', title: 'Binge-Worthy Series', movies: pickMovies(tvShows, 20, seed + 180) },
+    ];
 
-  res.set('Cache-Control', 'no-store');
-  res.json({ hero, heroes: heroPool, rows });
+    const payload = { hero, heroes: heroPool, rows };
+    rowsPayloadCache = { data: payload, at: now };
+    res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+    res.json(payload);
+  } catch (err) {
+    console.error('/api/rows failed:', err);
+    if (rowsPayloadCache.data) {
+      return res.json(rowsPayloadCache.data);
+    }
+    loadMovies();
+    const fallback = movies.filter((m) => m.poster).slice(0, 40);
+    res.json({
+      hero: fallback[0] || null,
+      heroes: fallback.slice(0, 12),
+      rows: [{ id: 'browse', title: 'Browse', movies: fallback }],
+    });
+  }
 });
 
 const redirectCache = new Map();
 
-async function resolveForId(id) {
+async function pickRedirectUrl(primary, fallbacks = []) {
+  const tryOne = async (url) =>
+    url && url !== PLACEHOLDER && (await probeImageUrl(url)) ? url : null;
+  const hit = await tryOne(primary);
+  if (hit) return hit;
+  for (const url of fallbacks) {
+    const ok = await tryOne(url);
+    if (ok) return ok;
+  }
+  return PLACEHOLDER;
+}
+
+async function resolveForId(id, { skipUnsplash = false } = {}) {
   const movie = findLocalMovie(id) || { imdbId: id.startsWith('tt') ? id : null, tmdbId: id };
-  return resolveImages(movie, {
-    tmdbKey: TMDB_API_KEY,
-    omdbKey: OMDB_API_KEY,
-    unsplashKey: UNSPLASH_ACCESS_KEY,
-  });
+  return resolveImages(movie, { ...imageOpts(), skipUnsplash });
 }
 
 app.get('/api/poster/:id', async (req, res) => {
   const { id } = req.params;
   const key = `p:${id}`;
   const hit = redirectCache.get(key);
-  if (hit && Date.now() - hit.at < 1000 * 60 * 60 * 12) {
+  if (hit && Date.now() - hit.at < 1000 * 60 * 60 * 12 && await probeImageUrl(hit.url)) {
     return res.redirect(302, hit.url);
   }
-  const enriched = await resolveForId(id);
-  const url = enriched.poster || PLACEHOLDER;
-  redirectCache.set(key, { url, at: Date.now() });
+  if (hit) redirectCache.delete(key);
+  const enriched = await resolveForId(id, { skipUnsplash: true });
+  const url = await pickRedirectUrl(enriched.poster);
+  if (url !== PLACEHOLDER) redirectCache.set(key, { url, at: Date.now() });
   res.set('Cache-Control', 'public, max-age=43200');
   res.redirect(302, url);
 });
@@ -328,23 +413,36 @@ app.get('/api/backdrop/:id', async (req, res) => {
   const { id } = req.params;
   const key = `b:${id}`;
   const hit = redirectCache.get(key);
-  if (hit && Date.now() - hit.at < 1000 * 60 * 60 * 12) {
+  if (hit && Date.now() - hit.at < 1000 * 60 * 60 * 12 && await probeImageUrl(hit.url)) {
     return res.redirect(302, hit.url);
   }
-  const enriched = await resolveForId(id);
-  const url = enriched.backdrop || enriched.poster || PLACEHOLDER;
-  redirectCache.set(key, { url, at: Date.now() });
+  if (hit) redirectCache.delete(key);
+  const enriched = await resolveForId(id, { skipUnsplash: true });
+  const url = await pickRedirectUrl(enriched.backdrop, [enriched.poster]);
+  if (url !== PLACEHOLDER) redirectCache.set(key, { url, at: Date.now() });
   res.set('Cache-Control', 'public, max-age=43200');
   res.redirect(302, url);
 });
 
 app.get('/api/images/:imdbId', async (req, res) => {
-  const enriched = await resolveForId(req.params.imdbId);
+  const enriched = await resolveForId(req.params.imdbId, { skipUnsplash: true });
   res.json({
     poster: enriched.poster,
     backdrop: enriched.backdrop,
     tmdbId: enriched.tmdbId,
   });
+});
+
+app.get('/api/trailer/:id', async (req, res) => {
+  if (!YOUTUBE_API_KEY) {
+    return res.status(503).json({ error: 'YouTube API not configured' });
+  }
+  const movie = await resolveMovie(req.params.id);
+  if (!movie) return res.status(404).json({ error: 'Title not found' });
+  const trailer = await fetchYoutubeTrailer(YOUTUBE_API_KEY, movie);
+  if (!trailer) return res.status(404).json({ error: 'Trailer not found' });
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.json(trailer);
 });
 
 function estimateEpisodeCount(fallbackMovie, seasonNum, seasonMeta) {
@@ -508,6 +606,14 @@ app.get('/api/enrich/:imdbId', async (req, res) => {
   res.json(movie);
 });
 
+app.get('/api/probe', async (req, res) => {
+  const target = req.query.url;
+  if (!target) return res.status(400).json({ error: 'Missing url' });
+  if (!isAllowedProviderUrl(target)) return res.status(403).json({ error: 'Provider not allowed' });
+  const result = await probeProviderUrl(target);
+  res.json(result);
+});
+
 app.get('/api/embed', (req, res) => {
   const target = req.query.url;
   if (!target) return res.status(400).send('Missing url');
@@ -542,10 +648,13 @@ if (serveStatic) {
 }
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`StreamApp API on port ${PORT}`);
+  const apiUrl = `http://localhost:${PORT}`;
+  console.log(`StreamApp API: ${apiUrl}`);
+  console.log(`Health check: ${apiUrl}/api/health`);
   console.log(`CORS: ${FRONTEND_URL || 'localhost + *.vercel.app'}`);
   console.log(`OMDb: ${OMDB_API_KEY ? 'enabled' : 'missing — set OMDB_API_KEY'}`);
   console.log(`TMDB: ${TMDB_API_KEY ? 'enabled' : 'optional'}`);
   console.log(`Unsplash: ${UNSPLASH_ACCESS_KEY ? 'enabled' : 'optional'}`);
+  console.log(`YouTube: ${YOUTUBE_API_KEY ? 'enabled' : 'optional — set YOUTUBE_API_KEY for trailers'}`);
   console.log(`Static UI: ${serveStatic ? 'enabled' : 'disabled (API only)'}`);
 });

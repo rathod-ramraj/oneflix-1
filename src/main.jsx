@@ -1,12 +1,15 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { initDevToolsGuard } from './utils/devToolsGuard';
+import { isBotClient } from './utils/botGuard';
 import App from './App.jsx';
+import BotBlock from './components/BotBlock.jsx';
 
-initDevToolsGuard();
+if (!isBotClient()) initDevToolsGuard();
 
-createRoot(document.getElementById('root')).render(
+const root = createRoot(document.getElementById('root'));
+root.render(
   <StrictMode>
-    <App />
-  </StrictMode>
+    {isBotClient() ? <BotBlock /> : <App />}
+  </StrictMode>,
 );

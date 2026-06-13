@@ -23,6 +23,12 @@ services:
       - key: YOUTUBE_API_KEY
         sync: false
         optional: true
+      - key: UNSPLASH_APPLICATION_ID
+        sync: false
+        optional: true
       - key: UNSPLASH_ACCESS_KEY
+        sync: false
+        optional: true
+      - key: UNSPLASH_SECRET_KEY
         sync: false
         optional: true

@@ -1,5 +1,6 @@
-import { motion } from 'framer-motion';
-import { getPoster, PLACEHOLDER } from '../utils/api';
+import { motion, useReducedMotion } from 'framer-motion';
+import { getPoster, getPosterApiUrl, PLACEHOLDER } from '../utils/api';
+import { cardMotion } from '../utils/motion';
 
 export default function MovieCard({
   movie,
@@ -7,23 +8,25 @@ export default function MovieCard({
   onInfo,
   onHoverPreload,
   index = 0,
+  animate = true,
   variant = 'landscape',
   rank,
   showRecent,
   episodeLabel,
+  progress,
 }) {
+  const reduced = useReducedMotion();
   const title = movie.title || movie.Title || 'Unknown';
   const poster = getPoster(movie);
   const match = movie.rating ? `${Math.round(parseFloat(movie.rating) * 10)}% match` : null;
   const isPortrait = variant === 'portrait' || variant === 'top10';
+  const isTop10 = variant === 'top10';
+  const motionProps = animate && !isTop10 ? cardMotion(index, reduced) : {};
 
   return (
     <motion.div
-      className={`movie-card-wrap${isPortrait ? ' portrait' : ''}${variant === 'top10' ? ' top10' : ''}`}
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: Math.min(index * 0.03, 0.25), duration: 0.35 }}
-      whileHover={{ y: -4 }}
+      className={`movie-card-wrap${isPortrait ? ' portrait' : ''}${isTop10 ? ' top10' : ''}`}
+      {...motionProps}
     >
       {variant === 'top10' && rank != null && (
         <span className="top10-rank" aria-hidden>{rank}</span>
@@ -41,11 +44,24 @@ export default function MovieCard({
           alt={title}
           loading="lazy"
           decoding="async"
+          fetchPriority={index < 4 ? 'high' : 'low'}
           onError={(e) => {
-            e.target.src = PLACEHOLDER;
+            const img = e.target;
+            const apiUrl = getPosterApiUrl(movie);
+            if (apiUrl && !img.dataset.retried) {
+              img.dataset.retried = '1';
+              img.src = apiUrl;
+              return;
+            }
+            if (img.src !== PLACEHOLDER) img.src = PLACEHOLDER;
           }}
         />
         {episodeLabel && <span className="card-ep-badge">{episodeLabel}</span>}
+        {progress > 0 && progress < 96 && (
+          <div className="card-progress-bar" aria-hidden>
+            <div className="card-progress-fill" style={{ width: `${Math.min(progress, 100)}%` }} />
+          </div>
+        )}
         {(showRecent || movie.recent) && <span className="card-recent-badge">Recently Added</span>}
         <div className="movie-card-hover-actions">
           <button

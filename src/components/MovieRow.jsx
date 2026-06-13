@@ -1,5 +1,8 @@
 import { useRef } from 'react';
+import { motion, useReducedMotion, animate } from 'framer-motion';
 import MovieCard from './MovieCard';
+import LazyRow from './LazyRow';
+import { EASE_OUT, rowReveal } from '../utils/motion';
 
 export default function MovieRow({
   title,
@@ -10,17 +13,33 @@ export default function MovieRow({
   onHoverPreload,
   variant = 'landscape',
   exploreLink,
+  eager = false,
 }) {
   const trackRef = useRef(null);
+  const reduced = useReducedMotion();
 
   const scroll = (dir) => {
     const el = trackRef.current;
     if (!el) return;
-    el.scrollBy({ left: dir * (variant === 'top10' ? 280 : 320), behavior: 'smooth' });
+    const card = el.querySelector('.movie-card-wrap');
+    const step = card ? card.offsetWidth + 10 : (variant === 'top10' ? 280 : 320);
+    const target = el.scrollLeft + dir * step;
+    if (reduced) {
+      el.scrollTo({ left: target, behavior: 'smooth' });
+      return;
+    }
+    animate(el.scrollLeft, target, {
+      duration: 0.55,
+      ease: EASE_OUT,
+      onUpdate: (v) => { el.scrollLeft = v; },
+    });
   };
 
-  return (
-    <section className={`row-section${variant === 'top10' ? ' row-top10' : ''}`}>
+  const body = (
+    <motion.section
+      className={`row-section${variant === 'top10' ? ' row-top10' : ''}`}
+      {...rowReveal(reduced)}
+    >
       <div className="row-header">
         <h2 className="row-title">{title}</h2>
         {exploreLink && <button type="button" className="row-explore">Explore All ›</button>}
@@ -29,7 +48,7 @@ export default function MovieRow({
         <button type="button" className="row-arrow left" onClick={() => scroll(-1)} aria-label="Previous">
           ‹
         </button>
-        <div className={`row-track${variant === 'top10' ? ' top10' : ''}`} ref={trackRef}>
+        <div className={`row-track${variant === 'top10' ? ' top10' : ''}${variant === 'continue' ? ' continue' : ''}`} ref={trackRef}>
           {loading
             ? Array.from({ length: 6 }).map((_, i) => (
                 <div key={i} className={`movie-card skeleton${variant === 'top10' ? ' portrait' : ''}`} />
@@ -39,10 +58,12 @@ export default function MovieRow({
                   key={movie.imdbId || movie.title}
                   movie={movie}
                   index={i}
+                  animate={eager || i < 8}
                   variant={variant}
                   rank={variant === 'top10' ? i + 1 : undefined}
                   showRecent={variant === 'top10'}
                   episodeLabel={movie.episodeLabel}
+                  progress={movie.progress}
                   onPlay={onPlay}
                   onInfo={onInfo}
                   onHoverPreload={onHoverPreload}
@@ -53,6 +74,9 @@ export default function MovieRow({
           ›
         </button>
       </div>
-    </section>
+    </motion.section>
   );
+
+  if (eager || loading) return body;
+  return <LazyRow minHeight={variant === 'top10' ? 280 : 220}>{body}</LazyRow>;
 }

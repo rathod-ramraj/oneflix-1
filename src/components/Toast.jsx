@@ -1,4 +1,14 @@
+import { AnimatePresence, motion } from 'framer-motion';
+import { toastMotion } from '../utils/motion';
+
 export default function Toast({ message }) {
-  if (!message) return null;
-  return <div className="toast glass-dark">{message}</div>;
+  return (
+    <AnimatePresence>
+      {message && (
+        <motion.div className="toast glass-dark" {...toastMotion}>
+          {message}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
 }

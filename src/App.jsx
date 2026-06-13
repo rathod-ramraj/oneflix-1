@@ -1,18 +1,22 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
+import { useReducedMotion, motion, AnimatePresence } from 'framer-motion';
 import './index.css';
 
 import Navbar from './components/Navbar';
 import Hero from './components/Hero';
 import MovieRow from './components/MovieRow';
-import Modal from './components/Modal';
-import Player from './components/Player';
-import SearchPage from './components/SearchPage';
 import Footer from './components/Footer';
-import ImdbIdWatch from './components/ImdbIdWatch';
 import Toast from './components/Toast';
+import LanguagesBrowse from './components/LanguagesBrowse';
 
-import { fetchRows, fetchMovie, getContinueWatching } from './utils/api';
+const Modal = lazy(() => import('./components/Modal'));
+const Player = lazy(() => import('./components/Player'));
+const SearchPage = lazy(() => import('./components/SearchPage'));
+const ImdbIdWatch = lazy(() => import('./components/ImdbIdWatch'));
+
+import { fetchRows, fetchMovie, getContinueWatching, getSavedResume } from './utils/api';
+import { getMyList } from './utils/myList';
+import { movieMatchesLanguage, languageLabel, LANGUAGES } from './utils/languages';
 import { proxiedEmbedUrl } from './utils/stream';
 import { fetchStreamProviders } from './utils/api';
 
@@ -34,9 +38,12 @@ export default function App() {
   const [playerEpisode, setPlayerEpisode] = useState(1);
   const [toastMsg, setToastMsg] = useState('');
   const [filteredMovies, setFilteredMovies] = useState(null);
+  const [selectedLanguage, setSelectedLanguage] = useState(LANGUAGES[0].id);
+  const [myList, setMyList] = useState(() => getMyList());
   const [continueWatching, setContinueWatching] = useState([]);
   const preloadRef = useRef(null);
   const toastTimer = useRef(null);
+  const reducedMotion = useReducedMotion();
 
   const showToast = useCallback((msg) => {
     setToastMsg(msg);
@@ -48,6 +55,8 @@ export default function App() {
     const fromApi = data.hero;
     if (fromApi && !HERO_EXCLUDE(fromApi)) return fromApi;
     return (
+      pool.find((m) => m.imdbId === 'tt37287335') ||
+      pool.find((m) => m.title === 'Obsession') ||
       pool.find((m) => m.title === 'Stranger Things') ||
       pool.find((m) => m.imdbId === 'tt4574334') ||
       pool[0] ||
@@ -70,25 +79,38 @@ export default function App() {
 
   const loadHomeRows = useCallback(async (silent = false) => {
     try {
-      const data = await fetchRows();
-      const list = data.rows || data;
+      const data = await fetchRows({ fresh: silent });
+      const list = Array.isArray(data?.rows) ? data.rows : [];
       const pool = buildHeroPool(data).filter(
-        (m) => !HERO_EXCLUDE(m) && (m.backdrop || m.poster) && m.backdrop !== 'N/A'
+        (m) => !HERO_EXCLUDE(m) && m?.imdbId && (m.poster || m.backdrop),
       );
-      setRows(list);
-      const hero = resolveHero(data, pool);
-      if (!silent) {
-        setHeroPool(pool);
-        heroIndexRef.current = 0;
-        setHeroMovie(hero);
-      } else {
-        setHeroPool((prev) => {
-          const merged = prev.filter((m) => !HERO_EXCLUDE(m));
-          pool.forEach((m) => {
-            if (!merged.some((x) => x.imdbId === m.imdbId)) merged.push(m);
+      const fallbackHero = list.flatMap((r) => r.movies || []).find((m) => m?.imdbId && !HERO_EXCLUDE(m));
+      const hero = resolveHero(data, pool) || fallbackHero || null;
+
+      if (list.length) setRows(list);
+      if (hero) {
+        if (!silent) {
+          setHeroPool(pool.length ? pool : [hero]);
+          heroIndexRef.current = 0;
+          setHeroMovie(hero);
+        } else {
+          setHeroPool((prev) => {
+            const merged = prev.filter((m) => !HERO_EXCLUDE(m));
+            (pool.length ? pool : [hero]).forEach((m) => {
+              if (!merged.some((x) => x.imdbId === m.imdbId)) merged.push(m);
+            });
+            return merged.length ? merged : [hero];
           });
-          return merged.length ? merged : pool;
-        });
+          setHeroMovie((current) => {
+            if (!current?.imdbId) return hero;
+            const fresh = pool.find((m) => m.imdbId === current.imdbId) || hero;
+            const idx = pool.findIndex((m) => m.imdbId === fresh.imdbId);
+            if (idx >= 0) heroIndexRef.current = idx;
+            return fresh;
+          });
+        }
+      } else if (!silent) {
+        setHeroMovie(null);
       }
     } catch (e) {
       console.error(e);
@@ -101,10 +123,15 @@ export default function App() {
   useEffect(() => {
     loadHomeRows();
     setContinueWatching(getContinueWatching());
+    const refreshCw = () => setContinueWatching(getContinueWatching());
+    window.addEventListener('sf-cw-update', refreshCw);
     const timer = setInterval(() => {
       if (page === PAGE.HOME) loadHomeRows(true);
     }, 60 * 1000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('sf-cw-update', refreshCw);
+    };
   }, [loadHomeRows, page]);
 
   useEffect(() => {
@@ -120,24 +147,32 @@ export default function App() {
   const handleNavigate = useCallback((id) => {
     setNavActive(id);
     setPage(PAGE.HOME);
-    if (id === 'home' || id === 'games' || id === 'livetv' || id === 'torrents' || id === 'languages') {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (id === 'home' || id === 'games' || id === 'livetv') {
       setFilteredMovies(null);
     } else if (id === 'movies') setFilteredMovies('movie');
     else if (id === 'tv') setFilteredMovies('tv');
     else if (id === 'anime') setFilteredMovies('anime');
-    else if (id === 'mylist') setFilteredMovies('mylist');
+    else if (id === 'mylist') {
+      setMyList(getMyList());
+      setFilteredMovies('mylist');
+    } else if (id === 'languages') {
+      setFilteredMovies('languages');
+    }
   }, []);
 
   const handleSearchNav = useCallback(() => {
     setPage(PAGE.SEARCH);
     setNavActive('search');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
   const handlePlay = useCallback((movie, opts = {}) => {
     setModal(null);
+    const saved = getSavedResume(movie);
     setPlayerMovie(movie);
-    setPlayerSeason(opts.season || 1);
-    setPlayerEpisode(opts.episode || 1);
+    setPlayerSeason(opts.season ?? saved?.season ?? 1);
+    setPlayerEpisode(opts.episode ?? saved?.episode ?? 1);
     document.body.style.overflow = 'hidden';
     showToast(`Now playing: ${movie.title}`);
   }, [showToast]);
@@ -187,9 +222,25 @@ export default function App() {
     } catch { /* ignore */ }
   }, []);
 
+  const refreshMyList = useCallback(() => setMyList(getMyList()), []);
+
   const displayRows = useMemo(() => {
     if (!filteredMovies) return rows;
-    if (filteredMovies === 'mylist') return [];
+    if (filteredMovies === 'mylist') {
+      if (!myList.length) return [];
+      return [{ id: 'mylist', title: 'My List', movies: myList }];
+    }
+    if (filteredMovies === 'languages') {
+      const allMovies = rows.flatMap((r) => r.movies || []);
+      const unique = [...new Map(allMovies.map((m) => [m.imdbId, m])).values()];
+      const movies = unique.filter((m) => movieMatchesLanguage(m, selectedLanguage));
+      if (!movies.length) return [];
+      return [{
+        id: `lang-${selectedLanguage}`,
+        title: `${languageLabel(selectedLanguage)} Movies & TV`,
+        movies,
+      }];
+    }
     if (filteredMovies === 'anime') {
       return rows
         .map((row) => ({
@@ -216,7 +267,7 @@ export default function App() {
       return [...filtered].sort((a, b) => (a.id === 'top10' || a.id === 'toprated' ? -1 : 0));
     }
     return filtered;
-  }, [rows, filteredMovies]);
+  }, [rows, filteredMovies, myList, selectedLanguage]);
 
   useEffect(() => {
     if (!rows.length) return;
@@ -229,29 +280,48 @@ export default function App() {
         ? pool.find((m) => m.type === 'movie')
         : filteredMovies === 'tv'
           ? pool.find((m) => m.type === 'tv')
-          : rows.find((r) => r.movies?.length)?.movies?.[0];
+          : pool[0];
 
     if (pick && filteredMovies) setHeroMovie(pick);
   }, [filteredMovies, rows, displayRows]);
 
   const browseContent = (
-    <>
+    <motion.div
+      key={`${page}-${filteredMovies || 'all'}`}
+      initial={false}
+      animate={{ opacity: 1, y: 0 }}
+    >
       <Navbar active={navActive} onNavigate={handleNavigate} onSearch={handleSearchNav} />
       {page === PAGE.SEARCH ? (
         <>
-          <SearchPage onPlay={handlePlay} onInfo={handleInfo} onHoverPreload={handleHoverPreload} />
+          <Suspense fallback={null}>
+            <SearchPage onPlay={handlePlay} onInfo={handleInfo} onHoverPreload={handleHoverPreload} />
+          </Suspense>
           <Footer />
         </>
       ) : (
         <>
           <Hero movie={heroMovie} onPlay={handlePlay} onInfo={handleInfo} />
-          <main className="main-content">
+          <motion.main
+            className="main-content"
+            initial={reducedMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.35, delay: 0.08 }}
+          >
+            {filteredMovies === 'languages' && (
+              <LanguagesBrowse
+                active={selectedLanguage}
+                onChange={setSelectedLanguage}
+              />
+            )}
             {continueWatching.length > 0 && !filteredMovies && (
               <MovieRow
+                eager
                 title="Continue Watching"
+                variant="continue"
                 movies={continueWatching.map((m) => ({
                   ...m,
-                  episodeLabel: m.type === 'tv' ? `S${m.season || 1}E${m.episode || 1}` : null,
+                  episodeLabel: m.type === 'tv' ? `S${m.season || 1} E${m.episode || 1}` : null,
                 }))}
                 loading={false}
                 onPlay={(m) => handlePlay(m, { season: m.season, episode: m.episode })}
@@ -259,9 +329,10 @@ export default function App() {
                 onHoverPreload={handleHoverPreload}
               />
             )}
-            {displayRows.map((row) => (
+            {displayRows.map((row, i) => (
               <MovieRow
                 key={row.id}
+                eager={i < 4}
                 title={row.title}
                 movies={row.movies}
                 variant={row.variant || 'landscape'}
@@ -272,43 +343,61 @@ export default function App() {
                 onHoverPreload={handleHoverPreload}
               />
             ))}
-          </main>
+            {filteredMovies === 'mylist' && !myList.length && (
+              <p className="browse-empty">Your list is empty. Open a title and tap + to add it.</p>
+            )}
+            {!loadingRows && !displayRows.length && !filteredMovies && (
+              <p className="browse-empty">
+                Nothing loaded yet.{' '}
+                <button type="button" className="row-explore" onClick={() => { setLoadingRows(true); loadHomeRows(); }}>
+                  Retry
+                </button>
+              </p>
+            )}
+            {filteredMovies === 'languages' && !displayRows.length && !loadingRows && (
+              <p className="browse-empty">No titles found for {languageLabel(selectedLanguage)}.</p>
+            )}
+          </motion.main>
           <Footer />
         </>
       )}
-    </>
+    </motion.div>
   );
 
   return (
     <>
       {!playerMovie && browseContent}
 
-      <AnimatePresence>
-        {playerMovie && (
-          <Player
-            key={playerMovie.imdbId}
-            movie={playerMovie}
-            season={playerSeason}
-            episode={playerEpisode}
-            onClose={closePlayer}
-            onEpisodeChange={handleEpisodeChange}
-          />
-        )}
-      </AnimatePresence>
+      <Suspense fallback={null}>
+        <AnimatePresence>
+          {playerMovie && (
+            <Player
+              key={playerMovie.imdbId}
+              movie={playerMovie}
+              season={playerSeason}
+              episode={playerEpisode}
+              onClose={closePlayer}
+              onEpisodeChange={handleEpisodeChange}
+            />
+          )}
+        </AnimatePresence>
 
-      <AnimatePresence>
-        {modal && !playerMovie && (
-          <Modal
-            movie={modal}
-            onClose={closeModal}
-            onPlay={handlePlay}
-          />
-        )}
-      </AnimatePresence>
+        <AnimatePresence>
+          {modal && !playerMovie && (
+            <Modal
+              movie={modal}
+              onClose={closeModal}
+              onPlay={handlePlay}
+              onMyListChange={refreshMyList}
+              showToast={showToast}
+            />
+          )}
+        </AnimatePresence>
 
-      {!playerMovie && (
-        <ImdbIdWatch onPlay={handlePlay} onInfo={handleInfo} showToast={showToast} />
-      )}
+        {!playerMovie && (
+          <ImdbIdWatch onPlay={handlePlay} onInfo={handleInfo} showToast={showToast} />
+        )}
+      </Suspense>
 
       <Toast message={toastMsg} />
     </>

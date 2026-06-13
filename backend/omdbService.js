@@ -152,8 +152,8 @@ function tmdbToResult(item, type) {
   return {
     tmdbId: item.id,
     type,
-    poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-    backdrop: item.backdrop_path ? `https://image.tmdb.org/t/p/w1280${item.backdrop_path}` : null,
+    poster: item.poster_path ? `https://image.tmdb.org/t/p/w780${item.poster_path}` : null,
+    backdrop: item.backdrop_path ? `https://image.tmdb.org/t/p/original${item.backdrop_path}` : null,
     seasons: null,
   };
 }
@@ -231,7 +231,7 @@ export async function searchTmdbAll(tmdbKey, query, maxPages = 10) {
     }
   }
 
-  const slice = raw.slice(0, 24);
+  const slice = raw.slice(0, 40);
   const withImdb = await mapWithConcurrency(slice, 10, async ({ item, type }) => {
     const imdbId = await fetchTmdbImdbId(tmdbKey, type, item.id);
     if (!imdbId) return null;
@@ -241,10 +241,11 @@ export async function searchTmdbAll(tmdbKey, query, maxPages = 10) {
       imdbId,
       tmdbId: item.id,
       type: type === 'tv' ? 'tv' : 'movie',
-      poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-      backdrop: item.backdrop_path ? `https://image.tmdb.org/t/p/w780${item.backdrop_path}` : null,
+      poster: item.poster_path ? `https://image.tmdb.org/t/p/w780${item.poster_path}` : null,
+      backdrop: item.backdrop_path ? `https://image.tmdb.org/t/p/original${item.backdrop_path}` : null,
       plot: item.overview || '',
       genre: '',
+      rating: item.vote_average ? item.vote_average.toFixed(1) : null,
     };
   });
 
@@ -262,7 +263,7 @@ export async function getTmdbTvSeasons(tmdbKey, tmdbId) {
     const count = data.number_of_seasons || 1;
     return {
       seasons: count,
-      poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
+      poster: data.poster_path ? `https://image.tmdb.org/t/p/w780${data.poster_path}` : null,
     };
   } catch {
     return null;
@@ -292,8 +293,8 @@ export async function fetchTmdbByNumericId(tmdbKey, tmdbId) {
         imdbId: ext.imdb_id || null,
         tmdbId: data.id,
         type: type === 'tv' ? 'tv' : 'movie',
-        poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
-        backdrop: data.backdrop_path ? `https://image.tmdb.org/t/p/w780${data.backdrop_path}` : null,
+        poster: data.poster_path ? `https://image.tmdb.org/t/p/w780${data.poster_path}` : null,
+        backdrop: data.backdrop_path ? `https://image.tmdb.org/t/p/original${data.backdrop_path}` : null,
         plot: data.overview || '',
         genre: (data.genres || []).map((g) => g.name).join(', '),
       };
@@ -330,22 +331,102 @@ export async function enrichMoviesPosters(tmdbKey, movies, limit = 20) {
   return out;
 }
 
+function hasRealPoster(movie) {
+  const p = movie?.poster;
+  return p && p !== 'N/A' && p !== PLACEHOLDER && !String(p).includes('photo-1489599849927');
+}
+
+function parseYear(movie) {
+  const y = parseInt(String(movie?.year || '').slice(0, 4), 10);
+  return Number.isNaN(y) ? 0 : y;
+}
+
+function recencyBoost(movie, query) {
+  const year = parseYear(movie);
+  if (!year) return 0;
+  const q = query.toLowerCase().trim();
+  const currentYear = new Date().getFullYear();
+  if (/^(latest|new|recent|newest)$/.test(q)) {
+    return Math.max(0, (year - (currentYear - 4)) * 5);
+  }
+  if (/^20(2[4-9]|[3-9]\d)$/.test(q) && String(year) === q) {
+    return 20;
+  }
+  if (year >= currentYear - 1) return 4;
+  if (movie.recent) return 6;
+  return 0;
+}
+
+function mergeMovieFields(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const pickPoster = hasRealPoster(b) ? b.poster : (hasRealPoster(a) ? a.poster : b.poster || a.poster);
+  const pickBackdrop = b.backdrop && b.backdrop !== PLACEHOLDER ? b.backdrop : a.backdrop;
+  return {
+    ...a,
+    ...b,
+    title: b.title || a.title,
+    year: b.year || a.year,
+    imdbId: b.imdbId || a.imdbId,
+    tmdbId: b.tmdbId || a.tmdbId,
+    type: b.type || a.type,
+    poster: pickPoster,
+    backdrop: pickBackdrop,
+    plot: (b.plot?.length || 0) > (a.plot?.length || 0) ? b.plot : a.plot,
+    genre: b.genre || a.genre,
+    rating: b.rating || a.rating,
+    recent: a.recent || b.recent,
+  };
+}
+
 export function searchLocalCatalog(catalog, query) {
   const q = query.trim().toLowerCase();
   if (!q) return [];
 
+  if (/^(latest|new|recent|newest)$/.test(q)) {
+    return catalog
+      .filter((m) => m.recent || parseYear(m) >= new Date().getFullYear() - 2)
+      .sort((a, b) => parseYear(b) - parseYear(a))
+      .map((m) => ({ ...m, _score: 90 + recencyBoost(m, q) }));
+  }
+
+  const yearMatch = q.match(/^20(2[4-9]|[3-9]\d)$/);
+  if (yearMatch) {
+    return catalog
+      .filter((m) => String(m.year || '').startsWith(q))
+      .sort((a, b) => parseYear(b) - parseYear(a))
+      .map((m) => ({ ...m, _score: 85 + recencyBoost(m, q) }));
+  }
+
   return catalog
     .filter((m) => fuzzyLocalMatch(m.title, q) || (m.genre && m.genre.toLowerCase().includes(q)))
-    .map((m) => ({ ...m, _score: relevanceScore(m.title, q) + 10 }))
+    .map((m) => ({ ...m, _score: relevanceScore(m.title, q) + 10 + recencyBoost(m, q) }))
     .sort((a, b) => b._score - a._score);
 }
 
-export function mergeSearchResults(local, omdb, query) {
-  const combined = [...local, ...omdb.map((m) => ({ ...m, _score: relevanceScore(m.title, query) }))];
-  const deduped = dedupeMovies(combined);
-  return deduped
-    .sort((a, b) => (b._score || 0) - (a._score || 0))
-    .map(({ _score, ...m }) => m);
+export function mergeSearchResults(local, remote, query) {
+  const ranked = new Map();
+
+  for (const m of [...local, ...remote]) {
+    if (!m?.imdbId) continue;
+    const score = (m._score ?? relevanceScore(m.title, query)) + recencyBoost(m, query);
+    const prev = ranked.get(m.imdbId);
+    if (!prev) {
+      ranked.set(m.imdbId, { item: m, score });
+    } else {
+      ranked.set(m.imdbId, {
+        item: mergeMovieFields(prev.item, m),
+        score: Math.max(prev.score, score),
+      });
+    }
+  }
+
+  return [...ranked.values()]
+    .sort((a, b) => b.score - a.score)
+    .map(({ item }) => {
+      const { _score, ...rest } = item;
+      return rest;
+    });
 }
 
 export { PLACEHOLDER };

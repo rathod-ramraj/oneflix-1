@@ -1,9 +1,16 @@
 /**
- * Resolve poster/backdrop via open APIs: TMDB → OMDb → imdbapi.dev
+ * Resolve poster/backdrop — catalog first, rotate TMDB/IMDb/OMDb, Unsplash last
  */
 import { findTmdbByImdb, fetchOmdbById, PLACEHOLDER } from './omdbService.js';
-import { fetchImdbApiById } from './imdbApiService.js';
+import { fetchImdbApiById, fetchImdbApiBestBackdrop, fetchImdbApiBestPoster } from './imdbApiService.js';
 import { fetchUnsplashImages } from './unsplashService.js';
+import {
+  upgradePosterUrl,
+  upgradeBackdropUrl,
+  isSameImageUrl,
+  isDirectImageUrl,
+  upgradeTmdbUrl,
+} from './imageUrls.js';
 
 const imageCache = new Map();
 const CACHE_TTL = 1000 * 60 * 60 * 6;
@@ -19,11 +26,11 @@ function cacheSet(key, data) {
 }
 
 function tmdbPoster(path) {
-  return path ? `https://image.tmdb.org/t/p/w500${path}` : null;
+  return path ? `https://image.tmdb.org/t/p/w780${path}` : null;
 }
 
 function tmdbBackdrop(path) {
-  return path ? `https://image.tmdb.org/t/p/w1280${path}` : null;
+  return path ? `https://image.tmdb.org/t/p/original${path}` : null;
 }
 
 async function fetchTmdbDetails(tmdbKey, tmdbId, type = 'movie') {
@@ -44,82 +51,323 @@ async function fetchTmdbDetails(tmdbKey, tmdbId, type = 'movie') {
   }
 }
 
-/** Resolve best poster + backdrop for one title */
-export async function resolveImages(movie, { tmdbKey = '', omdbKey = '', unsplashKey = '' } = {}) {
+async function fetchTmdbBestPoster(tmdbKey, tmdbId, type = 'movie') {
+  if (!tmdbKey || !tmdbId) return null;
+  const path = type === 'tv' ? 'tv' : 'movie';
+  try {
+    const res = await fetch(`https://api.themoviedb.org/3/${path}/${tmdbId}/images?api_key=${tmdbKey}`);
+    const data = await res.json();
+    const posters = (data.posters || [])
+      .filter((p) => p.file_path)
+      .sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
+    if (posters.length) return tmdbPoster(posters[0].file_path);
+    const detail = await fetchTmdbDetails(tmdbKey, tmdbId, type);
+    return detail?.poster || null;
+  } catch {
+    return null;
+  }
+}
+
+async function probeImageUrl(url) {
+  if (!url || !isDirectImageUrl(url)) return false;
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Range: 'bytes=0-0' },
+      signal: AbortSignal.timeout(6000),
+      redirect: 'follow',
+    });
+    return res.ok || res.status === 206;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchTmdbBestBackdrop(tmdbKey, tmdbId, type = 'movie') {
+  if (!tmdbKey || !tmdbId) return null;
+  const path = type === 'tv' ? 'tv' : 'movie';
+  try {
+    const res = await fetch(`https://api.themoviedb.org/3/${path}/${tmdbId}/images?api_key=${tmdbKey}`);
+    const data = await res.json();
+    const backdrops = (data.backdrops || [])
+      .filter((b) => b.file_path)
+      .sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
+    if (!backdrops.length) return null;
+    return tmdbBackdrop(backdrops[0].file_path);
+  } catch {
+    return null;
+  }
+}
+
+function catalogPoster(movie) {
+  const url = upgradePosterUrl(movie?.poster);
+  return isDirectImageUrl(url) ? url : null;
+}
+
+function catalogBackdrop(movie, poster) {
+  const url = upgradeBackdropUrl(movie?.backdrop);
+  if (!isDirectImageUrl(url)) return null;
+  if (isSameImageUrl(url, poster)) return null;
+  return url;
+}
+
+function isPlaceholderImage(url) {
+  if (!url) return true;
+  const u = String(url);
+  return u === PLACEHOLDER || u.includes('photo-1489599849927');
+}
+
+/** TMDB-only poster fill for search — skips slow Unsplash */
+export async function enrichSearchImages(movie, { tmdbKey }) {
   if (!movie) return movie;
-  const cacheKey = movie.imdbId || String(movie.tmdbId);
+  const hasPoster = movie.poster && !isPlaceholderImage(movie.poster);
+  if (hasPoster && movie.backdrop && !isPlaceholderImage(movie.backdrop)) return movie;
+  if (!tmdbKey) return movie;
+
+  let tmdb = null;
+  if (movie.tmdbId) {
+    tmdb = await fetchTmdbDetails(tmdbKey, movie.tmdbId, movie.type);
+  } else if (movie.imdbId) {
+    tmdb = await findTmdbByImdb(tmdbKey, movie.imdbId, movie.type === 'tv' ? 'tv' : 'movie');
+    if (tmdb?.tmdbId && (!tmdb.poster || !tmdb.backdrop)) {
+      const detail = await fetchTmdbDetails(tmdbKey, tmdb.tmdbId, tmdb.type);
+      if (detail) tmdb = { ...tmdb, ...detail };
+    }
+  }
+  if (!tmdb) return movie;
+
+  return {
+    ...movie,
+    tmdbId: tmdb.tmdbId || movie.tmdbId,
+    type: tmdb.type || movie.type,
+    poster: hasPoster ? movie.poster : (tmdb.poster || movie.poster),
+    backdrop: (!movie.backdrop || isPlaceholderImage(movie.backdrop))
+      ? (tmdb.backdrop || movie.backdrop)
+      : movie.backdrop,
+  };
+}
+
+export async function enrichSearchResults(results, opts = {}, limit = 32) {
+  if (!opts.tmdbKey || !results.length) return results;
+  const head = results.slice(0, limit);
+  const tail = results.slice(limit);
+  const enriched = await mapWithConcurrency(head, 10, (m) => enrichSearchImages(m, opts));
+  return [...enriched, ...tail];
+}
+
+const PROVIDER_CHAINS = [
+  ['imdb', 'tmdb', 'omdb'],
+  ['tmdb', 'imdb', 'omdb'],
+  ['imdb', 'omdb', 'tmdb'],
+  ['omdb', 'imdb', 'tmdb'],
+];
+
+function pickProviderChain(movie) {
+  const key = movie?.imdbId || movie?.title || 'x';
+  let h = 0;
+  for (let i = 0; i < key.length; i += 1) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return PROVIDER_CHAINS[h % PROVIDER_CHAINS.length];
+}
+
+function needsPoster(poster) {
+  return !poster || isPlaceholderImage(poster);
+}
+
+async function fillFromImdbPoster(movie) {
+  if (!movie.imdbId) return null;
+  const imdbPoster = await fetchImdbApiBestPoster(movie.imdbId);
+  if (imdbPoster) return upgradePosterUrl(imdbPoster) || imdbPoster;
+  const imdb = await fetchImdbApiById(movie.imdbId);
+  if (imdb?.poster && !imdb.poster.includes('unsplash')) {
+    return upgradePosterUrl(imdb.poster) || imdb.poster;
+  }
+  return null;
+}
+
+async function fillFromTmdbPoster(movie, tmdbKey, state) {
+  if (!tmdbKey) return null;
+  let { tmdbId, type } = state;
+  if (movie.tmdbId) {
+    const detail = await fetchTmdbDetails(tmdbKey, movie.tmdbId, movie.type);
+    if (detail?.poster) {
+      state.tmdbId = detail.tmdbId;
+      state.type = detail.type;
+      if (detail.backdrop && !isSameImageUrl(detail.backdrop, detail.poster)) {
+        state.backdropHint = detail.backdrop;
+      }
+      return detail.poster;
+    }
+    const best = await fetchTmdbBestPoster(tmdbKey, movie.tmdbId, movie.type);
+    if (best) return best;
+  }
+  if (movie.imdbId) {
+    const tmdb = await findTmdbByImdb(tmdbKey, movie.imdbId, movie.type === 'tv' ? 'tv' : 'movie');
+    if (tmdb?.poster) {
+      state.tmdbId = tmdb.tmdbId || state.tmdbId;
+      state.type = tmdb.type || state.type;
+      if (tmdb.backdrop && !isSameImageUrl(tmdb.backdrop, tmdb.poster)) {
+        state.backdropHint = tmdb.backdrop;
+      }
+      return upgradePosterUrl(tmdb.poster) || tmdb.poster;
+    }
+    if (tmdb?.tmdbId) {
+      const detail = await fetchTmdbDetails(tmdbKey, tmdb.tmdbId, tmdb.type);
+      if (detail?.poster) {
+        state.tmdbId = detail.tmdbId;
+        state.type = detail.type;
+        if (detail.backdrop && !isSameImageUrl(detail.backdrop, detail.poster)) {
+          state.backdropHint = detail.backdrop;
+        }
+        return detail.poster;
+      }
+    }
+  }
+  return null;
+}
+
+async function fillFromOmdbPoster(movie, omdbKey) {
+  if (!omdbKey || !movie.imdbId) return null;
+  const omdb = await fetchOmdbById(omdbKey, movie.imdbId);
+  if (omdb?.poster && omdb.poster !== 'N/A') {
+    return upgradePosterUrl(omdb.poster) || omdb.poster;
+  }
+  return null;
+}
+
+async function fillFromTmdbBackdrop(movie, tmdbKey, state, poster) {
+  if (!tmdbKey) return null;
+  const tmdbId = state.tmdbId || movie.tmdbId;
+  const type = state.type || movie.type || 'movie';
+  if (state.backdropHint && !isSameImageUrl(state.backdropHint, poster)) {
+    return state.backdropHint;
+  }
+  if (!tmdbId) return null;
+  const fromImages = await fetchTmdbBestBackdrop(tmdbKey, tmdbId, type);
+  if (fromImages && !isSameImageUrl(fromImages, poster)) return fromImages;
+  const detail = await fetchTmdbDetails(tmdbKey, tmdbId, type);
+  if (detail?.backdrop && !isSameImageUrl(detail.backdrop, poster)) return detail.backdrop;
+  return null;
+}
+
+async function fillFromImdbBackdrop(movie) {
+  if (!movie.imdbId) return null;
+  const imdbBg = await fetchImdbApiBestBackdrop(movie.imdbId);
+  return upgradeBackdropUrl(imdbBg) || imdbBg || null;
+}
+
+async function resolveFallbackImages(movie, { tmdbKey, omdbKey }) {
+  const state = {
+    tmdbId: movie.tmdbId || null,
+    type: movie.type || 'movie',
+    backdropHint: null,
+  };
+  let poster = null;
+  let backdrop = null;
+
+  const catPoster = catalogPoster(movie);
+  if (catPoster && !isPlaceholderImage(catPoster) && await probeImageUrl(catPoster)) {
+    poster = catPoster;
+  }
+  const catBg = catalogBackdrop(movie, poster);
+  if (catBg && await probeImageUrl(catBg)) backdrop = catBg;
+
+  for (const provider of pickProviderChain(movie)) {
+    if (needsPoster(poster)) {
+      if (provider === 'imdb') {
+        const p = await fillFromImdbPoster(movie);
+        if (p) poster = p;
+      } else if (provider === 'tmdb') {
+        const p = await fillFromTmdbPoster(movie, tmdbKey, state);
+        if (p) poster = p;
+      } else if (provider === 'omdb') {
+        const p = await fillFromOmdbPoster(movie, omdbKey);
+        if (p) poster = p;
+      }
+    }
+    if (!backdrop) {
+      if (provider === 'tmdb') {
+        const b = await fillFromTmdbBackdrop(movie, tmdbKey, state, poster);
+        if (b) backdrop = b;
+      } else if (provider === 'imdb') {
+        const b = await fillFromImdbBackdrop(movie);
+        if (b && !isSameImageUrl(b, poster)) backdrop = b;
+      }
+    }
+    if (poster && !needsPoster(poster) && backdrop) break;
+  }
+
+  if (!backdrop) {
+    const b = await fillFromTmdbBackdrop(movie, tmdbKey, state, poster)
+      || await fillFromImdbBackdrop(movie);
+    if (b && !isSameImageUrl(b, poster)) backdrop = b;
+  }
+
+  poster = isPlaceholderImage(poster) ? PLACEHOLDER : (poster || PLACEHOLDER);
+  backdrop = upgradeBackdropUrl(backdrop) || backdrop || poster;
+
+  if (backdrop && backdrop !== PLACEHOLDER && !(await probeImageUrl(backdrop))) {
+    let fixed = null;
+    const imdbBg = await fillFromImdbBackdrop(movie);
+    const upgraded = upgradeBackdropUrl(imdbBg) || imdbBg;
+    if (upgraded && await probeImageUrl(upgraded)) fixed = upgraded;
+    if (!fixed && poster && poster !== PLACEHOLDER && await probeImageUrl(poster)) {
+      fixed = poster;
+    }
+    backdrop = fixed || PLACEHOLDER;
+  }
+
+  return {
+    poster: upgradePosterUrl(poster) || poster,
+    backdrop,
+    tmdbId: state.tmdbId || movie.tmdbId,
+    type: state.type,
+  };
+}
+
+/** Resolve best poster + backdrop for one title */
+export async function resolveImages(movie, { tmdbKey = '', omdbKey = '', unsplashKey = '', skipUnsplash = false } = {}) {
+  if (!movie) return movie;
+  const cacheKey = movie.imdbId || String(movie.tmdbId) || movie.title;
   if (!cacheKey) return movie;
 
   const cached = cacheGet(cacheKey);
   if (cached?.poster && cached.poster !== PLACEHOLDER) {
-    return { ...movie, ...cached };
-  }
-
-  let poster = null;
-  let backdrop = null;
-  let tmdbId = movie.tmdbId || null;
-  let type = movie.type || 'movie';
-
-  if (tmdbKey && movie.tmdbId) {
-    const detail = await fetchTmdbDetails(tmdbKey, movie.tmdbId, movie.type);
-    if (detail?.poster) {
-      poster = detail.poster;
-      backdrop = detail.backdrop || detail.poster;
-      tmdbId = detail.tmdbId;
-      type = detail.type;
+    if (!skipUnsplash || cached.posterVerified) {
+      return { ...movie, ...cached };
     }
   }
 
-  if (!poster && tmdbKey && movie.imdbId) {
-    const tmdb = await findTmdbByImdb(tmdbKey, movie.imdbId, movie.type === 'tv' ? 'tv' : 'movie');
-    if (tmdb?.poster) {
-      poster = tmdb.poster;
-      backdrop = tmdb.backdrop || tmdb.poster;
-      tmdbId = tmdb.tmdbId || tmdbId;
-      type = tmdb.type || type;
-    } else if (tmdb?.tmdbId) {
-      const detail = await fetchTmdbDetails(tmdbKey, tmdb.tmdbId, tmdb.type);
-      if (detail?.poster) {
-        poster = detail.poster;
-        backdrop = detail.backdrop || detail.poster;
-        tmdbId = detail.tmdbId;
-        type = detail.type;
-      }
+  const fallback = await resolveFallbackImages(movie, { tmdbKey, omdbKey });
+  let poster = fallback.poster;
+  let backdrop = fallback.backdrop;
+
+  const missingPoster = needsPoster(poster);
+  const missingBackdrop = !backdrop || backdrop === PLACEHOLDER || isPlaceholderImage(backdrop);
+  if (!skipUnsplash && unsplashKey && movie.title && (missingPoster || missingBackdrop)) {
+    try {
+      const unsplash = await fetchUnsplashImages(
+        unsplashKey,
+        movie.title,
+        movie.genre,
+        movie.type,
+      );
+      if (unsplash?.poster && missingPoster) poster = unsplash.poster;
+      if (unsplash?.backdrop && missingBackdrop) backdrop = unsplash.backdrop;
+      else if (unsplash?.poster && missingBackdrop) backdrop = unsplash.poster;
+    } catch {
+      /* keep catalog/TMDB/IMDb result */
     }
   }
 
-  if (!poster && omdbKey && movie.imdbId) {
-    const omdb = await fetchOmdbById(omdbKey, movie.imdbId);
-    if (omdb?.poster && omdb.poster !== 'N/A') {
-      poster = omdb.poster;
-      backdrop = omdb.backdrop && omdb.backdrop !== 'N/A' ? omdb.backdrop : omdb.poster;
-    }
-  }
-
-  if (!poster && movie.imdbId) {
-    const imdb = await fetchImdbApiById(movie.imdbId);
-    if (imdb?.poster && !imdb.poster.includes('unsplash')) {
-      poster = imdb.poster;
-      backdrop = imdb.backdrop && !imdb.backdrop.includes('unsplash') ? imdb.backdrop : imdb.poster;
-    }
-  }
-
-  if (!poster && unsplashKey && movie.title) {
-    const unsplash = await fetchUnsplashImages(unsplashKey, movie.title, movie.genre);
-    if (unsplash?.poster) {
-      poster = unsplash.poster;
-      backdrop = unsplash.backdrop || unsplash.poster;
-    }
-  }
-
+  const posterOk = poster && poster !== PLACEHOLDER
+    && (skipUnsplash ? await probeImageUrl(poster) : true);
   const result = {
-    poster: poster || (movie.poster && !String(movie.poster).includes('unsplash.com/photo-1489599849927') ? movie.poster : null) || PLACEHOLDER,
-    backdrop: backdrop || movie.backdrop || poster || movie.poster || PLACEHOLDER,
-    tmdbId: tmdbId || movie.tmdbId,
-    type,
+    ...fallback,
+    poster: posterOk ? poster : PLACEHOLDER,
+    backdrop: backdrop || poster || PLACEHOLDER,
+    posterVerified: posterOk,
   };
-
-  if (result.poster !== PLACEHOLDER) cacheSet(cacheKey, result);
+  if (posterOk) cacheSet(cacheKey, result);
   return { ...movie, ...result };
 }
 
@@ -136,18 +384,21 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
-/** Batch-enrich unique movies for home rows */
-export async function enrichMoviesImages(movies, opts = {}, concurrency = 8) {
+export async function enrichMoviesImages(movies, opts = {}, concurrency = 4) {
   const unique = [];
   const seen = new Set();
   for (const m of movies) {
-    if (!m?.imdbId || seen.has(m.imdbId)) continue;
-    seen.add(m.imdbId);
+    const key = m?.imdbId || m?.title;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
     unique.push(m);
   }
   const enriched = await mapWithConcurrency(unique, concurrency, (m) => resolveImages(m, opts));
-  const map = new Map(enriched.map((m) => [m.imdbId, m]));
-  return (list) => list.map((m) => (m?.imdbId && map.has(m.imdbId) ? map.get(m.imdbId) : m));
+  const map = new Map(enriched.map((m) => [m.imdbId || m.title, m]));
+  return (list) => list.map((m) => {
+    const key = m?.imdbId || m?.title;
+    return key && map.has(key) ? map.get(key) : m;
+  });
 }
 
-export { PLACEHOLDER };
+export { PLACEHOLDER, upgradePosterUrl, upgradeBackdropUrl, upgradeTmdbUrl, probeImageUrl, mapWithConcurrency };

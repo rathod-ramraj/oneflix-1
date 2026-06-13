@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { fetchStreamProviders, fetchEpisodes, fetchTvSeasons, saveWatchProgress } from '../utils/api';
+import { fetchStreamProviders, fetchEpisodes, fetchTvSeasons, saveWatchProgress, probeStreamUrls } from '../utils/api';
 import { proxiedEmbedUrl } from '../utils/stream';
 
 const LOAD_TIMEOUT = 12000;
@@ -8,6 +8,10 @@ const VIDSRC_PROGRESS_KEY = 'vidsrcwtf-Progress';
 
 function streamLookupId(movie) {
   return movie?.imdbId || (movie?.tmdbId != null ? String(movie.tmdbId) : null);
+}
+
+function sortProviders(list) {
+  return [...list].sort((a, b) => Number(b.working) - Number(a.working));
 }
 
 export default function Player({
@@ -27,8 +31,11 @@ export default function Player({
   const [seasonsMeta, setSeasonsMeta] = useState([]);
   const [loadingEps, setLoadingEps] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [probing, setProbing] = useState(false);
   const iframeRef = useRef(null);
   const failTimerRef = useRef(null);
+  const probeGenRef = useRef(0);
+  const providerIndexRef = useRef(0);
   const endedRef = useRef(false);
   const isTv = movie?.type === 'tv' || movie?.Type === 'series';
 
@@ -42,17 +49,35 @@ export default function Player({
     if (initEpisode != null) setEpisode(initEpisode);
   }, [initEpisode]);
 
+  const probeAndRank = useCallback(async (list) => {
+    if (!list.length) {
+      setProviders([]);
+      setProviderIndex(0);
+      setLoadFailed(true);
+      return;
+    }
+    const gen = ++probeGenRef.current;
+    setProbing(true);
+    setLoadFailed(false);
+    const checks = await probeStreamUrls(list.map((p) => p.url));
+    if (gen !== probeGenRef.current) return;
+    const ranked = sortProviders(list.map((p, i) => ({ ...p, working: checks[i] })));
+    const firstOk = ranked.findIndex((p) => p.working);
+    setProviders(ranked);
+    setProviderIndex(firstOk >= 0 ? firstOk : 0);
+    setLoadFailed(firstOk < 0);
+    setProbing(false);
+  }, []);
+
   const loadProviders = useCallback(async () => {
     const lookupId = streamLookupId(movie);
     if (!lookupId) return;
     const s = isTv ? season : null;
     const e = isTv ? episode : null;
     const data = await fetchStreamProviders(lookupId, s, e);
-    setProviders(data.providers || []);
-    setProviderIndex(0);
-    setLoadFailed(false);
     endedRef.current = false;
-  }, [movie, season, episode, isTv]);
+    await probeAndRank(data.providers || []);
+  }, [movie, season, episode, isTv, probeAndRank]);
 
   const loadSeasonsMeta = useCallback(async () => {
     const lookupId = streamLookupId(movie);
@@ -101,26 +126,36 @@ export default function Player({
     endedRef.current = false;
   };
 
-  const currentProvider = providers[providerIndex];
-  const embedSrc = currentProvider ? proxiedEmbedUrl(currentProvider.url) : '';
+  useEffect(() => {
+    providerIndexRef.current = providerIndex;
+  }, [providerIndex]);
 
-  const tryNextProvider = useCallback(() => {
-    setProviderIndex((i) => {
-      if (i < providers.length - 1) {
+  const currentProvider = providers[providerIndex];
+  const embedSrc = currentProvider && !probing ? proxiedEmbedUrl(currentProvider.url) : '';
+
+  const demoteAndTryNext = useCallback(() => {
+    setProviders((prev) => {
+      if (!prev.length) return prev;
+      const failedName = prev[providerIndexRef.current]?.name;
+      const updated = prev.map((p) => (p.name === failedName ? { ...p, working: false } : p));
+      const ranked = sortProviders(updated);
+      const nextIdx = ranked.findIndex((p) => p.working);
+      if (nextIdx >= 0) {
+        setProviderIndex(nextIdx);
         setLoadFailed(false);
-        return i + 1;
+      } else {
+        probeAndRank(prev.map((p) => ({ name: p.name, label: p.label, url: p.url })));
       }
-      setLoadFailed(true);
-      return i;
+      return ranked;
     });
-  }, [providers.length]);
+  }, [probeAndRank]);
 
   useEffect(() => {
     clearTimeout(failTimerRef.current);
-    if (!embedSrc) return;
-    failTimerRef.current = setTimeout(tryNextProvider, LOAD_TIMEOUT);
+    if (!embedSrc || probing) return;
+    failTimerRef.current = setTimeout(demoteAndTryNext, LOAD_TIMEOUT);
     return () => clearTimeout(failTimerRef.current);
-  }, [embedSrc, providerIndex, tryNextProvider]);
+  }, [embedSrc, providerIndex, probing, demoteAndTryNext]);
 
   const goToNextEpisode = useCallback(() => {
     if (!isTv) return;
@@ -155,7 +190,7 @@ export default function Player({
 
       if (type === 'timeupdate' || type === 'progress') {
         const pct = p ?? (duration ? (currentTime / duration) * 100 : 0);
-        saveWatchProgress(movie, pct, season, episode);
+        if (pct >= 5) saveWatchProgress(movie, pct, season, episode);
         if (isTv && pct >= 97 && !endedRef.current) {
           endedRef.current = true;
           setTimeout(goToNextEpisode, 1500);
@@ -190,10 +225,16 @@ export default function Player({
     endedRef.current = false;
   };
 
+  const pickServer = (idx) => {
+    setProviderIndex(idx);
+    setLoadFailed(false);
+  };
+
   if (!movie) return null;
 
   const title = movie.title || movie.Title || '';
   const epLabel = isTv ? ` · S${season} E${episode}` : '';
+  const workingCount = providers.filter((p) => p.working).length;
 
   const seasonOptions = seasonsMeta.length
     ? seasonsMeta
@@ -222,7 +263,7 @@ export default function Player({
             </button>
           )}
           <button type="button" className="btn-glass-pill" onClick={() => setShowServer((v) => !v)}>
-            Server
+            Server{workingCount > 0 ? ` (${workingCount})` : ''}
           </button>
           <button type="button" className="nav-icon-btn glass-dark" onClick={() => setShowServer((v) => !v)} aria-label="Menu">
             ☰
@@ -239,33 +280,39 @@ export default function Player({
             exit={{ opacity: 0, y: -10 }}
           >
             <motion.div className="server-panel-header">
-              <span>Playback issues? Try another server.</span>
+              <span>
+                {probing ? 'Checking servers…' : workingCount ? `${workingCount} server${workingCount > 1 ? 's' : ''} online` : 'No servers responding'}
+              </span>
               <button type="button" className="control-btn" onClick={() => setShowServer(false)}>Hide</button>
             </motion.div>
-            <select
-              value={providerIndex}
-              onChange={(e) => {
-                setProviderIndex(Number(e.target.value));
-                setLoadFailed(false);
-              }}
-            >
+            <div className="server-list">
               {providers.map((p, i) => (
-                <option key={p.name} value={i}>{p.label}</option>
+                <button
+                  key={p.name}
+                  type="button"
+                  className={`server-option${i === providerIndex ? ' active' : ''}${p.working ? ' server-ok' : ' server-fail'}`}
+                  onClick={() => pickServer(i)}
+                >
+                  <span className={`server-dot${p.working ? ' ok' : ''}`} />
+                  <span className="server-option-label">{p.label}</span>
+                  {i === providerIndex && <span className="server-playing">Playing</span>}
+                </button>
               ))}
-            </select>
-            <p className="server-hint">Server quality and progress can vary by provider.</p>
+            </div>
             {loadFailed && (
-              <p className="server-hint" style={{ color: '#ff6b6b' }}>Provider failed — try another server.</p>
+              <p className="server-hint" style={{ color: '#ff6b6b' }}>All servers failed — try again later.</p>
             )}
           </motion.div>
         )}
       </AnimatePresence>
 
       <motion.div className="player-frame-wrap">
-        {embedSrc ? (
+        {probing ? (
+          <motion.div className="player-loading">Finding working server…</motion.div>
+        ) : embedSrc ? (
           <iframe
             ref={iframeRef}
-            key={`${providerIndex}-${season}-${episode}`}
+            key={`${currentProvider?.name}-${season}-${episode}`}
             src={embedSrc}
             title={title}
             allow="autoplay; fullscreen; encrypted-media"

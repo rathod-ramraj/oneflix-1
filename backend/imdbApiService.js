@@ -65,6 +65,53 @@ export function normalizeImdbApiTitle(item) {
   };
 }
 
+async function fetchImdbApiImageList(imdbId) {
+  const res = await fetch(`${IMDB_API_BASE}/titles/${imdbId}/images`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data.images) ? data.images : [];
+}
+
+/** Best portrait for posters (imdbapi.dev images) */
+export async function fetchImdbApiBestPoster(imdbId) {
+  if (!imdbId) return null;
+  const cacheKey = `poster:${imdbId}`;
+  const cached = cacheGet(titleCache, cacheKey);
+  if (cached) return cached;
+
+  try {
+    const images = await fetchImdbApiImageList(imdbId);
+    const portraits = images
+      .filter((img) => img.url && img.width && img.height && img.height >= img.width)
+      .sort((a, b) => (b.width * b.height) - (a.width * a.height));
+    const url = portraits[0]?.url || null;
+    if (url) cacheSet(titleCache, cacheKey, url);
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+/** Best landscape still for hero/backdrop (imdbapi.dev images) */
+export async function fetchImdbApiBestBackdrop(imdbId) {
+  if (!imdbId) return null;
+  const cacheKey = `bg:${imdbId}`;
+  const cached = cacheGet(titleCache, cacheKey);
+  if (cached) return cached;
+
+  try {
+    const images = await fetchImdbApiImageList(imdbId);
+    const landscape = images
+      .filter((img) => img.url && img.width && img.height && img.width >= img.height * 1.2)
+      .sort((a, b) => (b.width * b.height) - (a.width * a.height));
+    const url = landscape[0]?.url || images.find((img) => img.url)?.url || null;
+    if (url) cacheSet(titleCache, cacheKey, url);
+    return url;
+  } catch {
+    return null;
+  }
+}
+
 /** Fetch single title by IMDb id */
 export async function fetchImdbApiById(imdbId) {
   const cached = cacheGet(titleCache, imdbId);

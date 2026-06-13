@@ -86,11 +86,27 @@ const SERVERS = [
   },
   {
     name: 'vidfast',
-    label: 'Vidfast',
-    imdb: false,
+    label: 'Vidfast — Auto play',
+    imdb: true,
     tmdb: true,
-    movie: 'https://vidfast.pro/movie/{id}',
-    tv: 'https://vidfast.pro/tv/{id}/{season}/{episode}',
+    movie: 'https://vidfast.pro/movie/{id}?autoPlay=true',
+    tv: 'https://vidfast.pro/tv/{id}/{season}/{episode}?autoPlay=true&nextButton=true&autoNext=true',
+  },
+  {
+    name: 'vidcore',
+    label: 'VidCore — Auto play',
+    imdb: true,
+    tmdb: true,
+    movie: 'https://vidcore.net/movie/{id}?autoPlay=true',
+    tv: 'https://vidcore.net/tv/{id}/{season}/{episode}?autoPlay=true&nextButton=true&autoNext=true',
+  },
+  {
+    name: 'vidstorm',
+    label: 'VidStorm',
+    imdb: true,
+    tmdb: true,
+    movie: 'https://vidstorm.ru/movie/{id}',
+    tv: 'https://vidstorm.ru/tv/{id}/{season}/{episode}',
   },
   {
     name: 'vidnest',
@@ -193,3 +209,36 @@ export const ALLOWED_EMBED_HOSTS = [
     SERVERS.flatMap((s) => [s.movie, s.tv].filter(Boolean).map((u) => new URL(u.replace(/\{[^}]+\}/g, 'x')).hostname)),
   ),
 ];
+
+const PROBE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+
+/** HEAD/GET check — false on 404, 5xx, or network error */
+export async function probeProviderUrl(url, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const opts = {
+    signal: controller.signal,
+    redirect: 'follow',
+    headers: { 'User-Agent': PROBE_UA },
+  };
+  try {
+    let res = await fetch(url, { ...opts, method: 'HEAD' });
+    if (res.status === 405 || res.status === 501) {
+      res = await fetch(url, { ...opts, method: 'GET', headers: { ...opts.headers, Range: 'bytes=0-0' } });
+    }
+    return { ok: res.status !== 404 && res.status < 500, status: res.status };
+  } catch {
+    return { ok: false, status: 0 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function isAllowedProviderUrl(url) {
+  try {
+    const { hostname } = new URL(url);
+    return ALLOWED_EMBED_HOSTS.some((h) => hostname === h || hostname.endsWith(`.${h}`));
+  } catch {
+    return false;
+  }
+}

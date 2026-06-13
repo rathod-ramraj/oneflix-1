@@ -86,4 +86,4 @@ export function getSearchSuggestions(prefix, limit = 8) {
   }).slice(0, limit);
 }
 
-export const POPULAR_SEARCHES = ['batman', 'marvel', 'stranger things', 'breaking bad', 'avatar'];
+export const POPULAR_SEARCHES = ['latest', '2025', '2026', 'batman', 'marvel', 'stranger things', 'breaking bad', 'avatar'];
