@@ -325,7 +325,7 @@ async function resolveFallbackImages(movie, { tmdbKey, omdbKey }) {
 }
 
 /** Resolve best poster + backdrop for one title */
-export async function resolveImages(movie, { tmdbKey = '', omdbKey = '', unsplashKey = '', skipUnsplash = false } = {}) {
+export async function resolveImages(movie, { tmdbKey = '', omdbKey = '', unsplashKey = '', unsplashKeys = null, skipUnsplash = false } = {}) {
   if (!movie) return movie;
   const cacheKey = movie.imdbId || String(movie.tmdbId) || movie.title;
   if (!cacheKey) return movie;
@@ -343,10 +343,11 @@ export async function resolveImages(movie, { tmdbKey = '', omdbKey = '', unsplas
 
   const missingPoster = needsPoster(poster);
   const missingBackdrop = !backdrop || backdrop === PLACEHOLDER || isPlaceholderImage(backdrop);
-  if (!skipUnsplash && unsplashKey && movie.title && (missingPoster || missingBackdrop)) {
+  const unsplashPool = unsplashKeys?.length ? unsplashKeys : (unsplashKey ? [unsplashKey] : []);
+  if (!skipUnsplash && unsplashPool.length && movie.title && (missingPoster || missingBackdrop)) {
     try {
       const unsplash = await fetchUnsplashImages(
-        unsplashKey,
+        unsplashPool,
         movie.title,
         movie.genre,
         movie.type,

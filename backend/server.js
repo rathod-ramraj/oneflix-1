@@ -22,6 +22,7 @@ import { resolveImages, enrichSearchResults, probeImageUrl } from './imageServic
 import { buildStreamProviders, ALLOWED_EMBED_HOSTS, probeProviderUrl, isAllowedProviderUrl } from './streamProviders.js';
 import { isBotRequest, BOT_BLOCK_MESSAGE } from './botGuard.js';
 import { fetchYoutubeTrailer } from './youtubeService.js';
+import { configureUnsplashKeys } from './unsplashService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -31,15 +32,36 @@ const PORT = process.env.PORT || 3001;
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 const OMDB_API_KEY = process.env.OMDB_API_KEY || '';
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY || '';
+const UNSPLASH_ACCESS_KEY_2 = process.env.UNSPLASH_ACCESS_KEY_2 || '';
 const UNSPLASH_APPLICATION_ID = process.env.UNSPLASH_APPLICATION_ID || '';
+const UNSPLASH_APPLICATION_ID_2 = process.env.UNSPLASH_APPLICATION_ID_2 || '';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
+
+function loadUnsplashAccessKeys() {
+  const fromList = (process.env.UNSPLASH_ACCESS_KEYS || '')
+    .split(',')
+    .map((k) => k.trim())
+    .filter(Boolean);
+  const keys = [
+    ...fromList,
+    UNSPLASH_ACCESS_KEY,
+    UNSPLASH_ACCESS_KEY_2,
+  ].filter(Boolean);
+  return [...new Set(keys)];
+}
+
+const UNSPLASH_ACCESS_KEYS = loadUnsplashAccessKeys();
+configureUnsplashKeys(
+  UNSPLASH_ACCESS_KEYS,
+  [UNSPLASH_APPLICATION_ID, UNSPLASH_APPLICATION_ID_2].filter(Boolean),
+);
 
 function imageOpts() {
   return {
     tmdbKey: TMDB_API_KEY,
     omdbKey: OMDB_API_KEY,
-    unsplashKey: UNSPLASH_ACCESS_KEY,
-    unsplashAppId: UNSPLASH_APPLICATION_ID,
+    unsplashKeys: UNSPLASH_ACCESS_KEYS,
+    unsplashKey: UNSPLASH_ACCESS_KEYS[0] || '',
   };
 }
 
@@ -654,7 +676,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`CORS: ${FRONTEND_URL || 'localhost + *.vercel.app'}`);
   console.log(`OMDb: ${OMDB_API_KEY ? 'enabled' : 'missing — set OMDB_API_KEY'}`);
   console.log(`TMDB: ${TMDB_API_KEY ? 'enabled' : 'optional'}`);
-  console.log(`Unsplash: ${UNSPLASH_ACCESS_KEY ? 'enabled' : 'optional'}`);
+  console.log(`Unsplash: ${UNSPLASH_ACCESS_KEYS.length ? `enabled (${UNSPLASH_ACCESS_KEYS.length} keys)` : 'optional'}`);
   console.log(`YouTube: ${YOUTUBE_API_KEY ? 'enabled' : 'optional — set YOUTUBE_API_KEY for trailers'}`);
   console.log(`Static UI: ${serveStatic ? 'enabled' : 'disabled (API only)'}`);
 });

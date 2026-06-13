@@ -32,3 +32,15 @@ services:
       - key: UNSPLASH_SECRET_KEY
         sync: false
         optional: true
+      - key: UNSPLASH_APPLICATION_ID_2
+        sync: false
+        optional: true
+      - key: UNSPLASH_ACCESS_KEY_2
+        sync: false
+        optional: true
+      - key: UNSPLASH_SECRET_KEY_2
+        sync: false
+        optional: true
+      - key: UNSPLASH_ACCESS_KEYS
+        sync: false
+        optional: true
