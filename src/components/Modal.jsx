@@ -33,7 +33,9 @@ export default function Modal({ movie, onClose, onPlay, onMyListChange, showToas
     setInList(isInMyList(movie));
     setShowTrailer(false);
     setTrailer(null);
-    fetchMovie(movie.imdbId).then((d) => setDetail((prev) => ({ ...prev, ...d }))).catch(() => {});
+    if (!movie.plot && !movie.genre) {
+      fetchMovie(movie.imdbId).then((d) => setDetail((prev) => ({ ...prev, ...d }))).catch(() => {});
+    }
     fetchTrailer(movie.imdbId).then(setTrailer).catch(() => setTrailer(null));
   }, [movie]);
 

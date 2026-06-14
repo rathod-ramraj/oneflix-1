@@ -1,19 +1,16 @@
 import { useRef } from 'react';
-import { motion, useReducedMotion, animate } from 'framer-motion';
+import { animate, useReducedMotion } from 'framer-motion';
 import MovieCard from './MovieCard';
-import LazyRow from './LazyRow';
-import { EASE_OUT, rowReveal } from '../utils/motion';
+import { EASE_OUT } from '../utils/motion';
 
 export default function MovieRow({
   title,
   movies,
-  loading,
   onPlay,
   onInfo,
   onHoverPreload,
   variant = 'landscape',
   exploreLink,
-  eager = false,
 }) {
   const trackRef = useRef(null);
   const reduced = useReducedMotion();
@@ -35,11 +32,8 @@ export default function MovieRow({
     });
   };
 
-  const body = (
-    <motion.section
-      className={`row-section${variant === 'top10' ? ' row-top10' : ''}`}
-      {...rowReveal(reduced)}
-    >
+  return (
+    <section className={`row-section${variant === 'top10' ? ' row-top10' : ''}`}>
       <div className="row-header">
         <h2 className="row-title">{title}</h2>
         {exploreLink && <button type="button" className="row-explore">Explore All ›</button>}
@@ -49,16 +43,12 @@ export default function MovieRow({
           ‹
         </button>
         <div className={`row-track${variant === 'top10' ? ' top10' : ''}${variant === 'continue' ? ' continue' : ''}`} ref={trackRef}>
-          {loading
-            ? Array.from({ length: 6 }).map((_, i) => (
-                <div key={i} className={`movie-card skeleton${variant === 'top10' ? ' portrait' : ''}`} />
-              ))
-            : movies.map((movie, i) => (
+          {movies.map((movie, i) => (
                 <MovieCard
                   key={movie.imdbId || movie.title}
                   movie={movie}
                   index={i}
-                  animate={eager || i < 8}
+                  animate={false}
                   variant={variant}
                   rank={variant === 'top10' ? i + 1 : undefined}
                   showRecent={variant === 'top10'}
@@ -74,9 +64,6 @@ export default function MovieRow({
           ›
         </button>
       </div>
-    </motion.section>
+    </section>
   );
-
-  if (eager || loading) return body;
-  return <LazyRow minHeight={variant === 'top10' ? 280 : 220}>{body}</LazyRow>;
 }

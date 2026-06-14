@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from 'framer-motion';
-import { getPoster, getPosterApiUrl, PLACEHOLDER } from '../utils/api';
+import { getPoster, getPosterApiUrl, markPosterFailed, PLACEHOLDER } from '../utils/api';
 import { cardMotion } from '../utils/motion';
 
 export default function MovieCard({
@@ -42,17 +42,18 @@ export default function MovieCard({
         <img
           src={poster}
           alt={title}
-          loading="lazy"
+          loading="eager"
           decoding="async"
-          fetchPriority={index < 4 ? 'high' : 'low'}
           onError={(e) => {
             const img = e.target;
+            const id = movie?.imdbId || movie?.imdbID;
             const apiUrl = getPosterApiUrl(movie);
             if (apiUrl && !img.dataset.retried) {
               img.dataset.retried = '1';
               img.src = apiUrl;
               return;
             }
+            if (id) markPosterFailed(id);
             if (img.src !== PLACEHOLDER) img.src = PLACEHOLDER;
           }}
         />

@@ -173,14 +173,14 @@ async function resolveMovie(id) {
   return null;
 }
 
-/** Fast search: local + TMDB + imdbapi (+ OMDb fallback) */
-app.get('/api/search', async (req, res) => {
-  const q = (req.query.q || '').trim();
-  const maxPages = Math.min(parseInt(req.query.pages, 10) || 10, 15);
+/** In-memory full-search cache — one external fetch per query, paginated slices after */
+const searchFullCache = new Map();
 
-  if (!q) return res.json({ results: [], total: 0 });
+async function fetchFullSearchResults(q, maxPages) {
+  const key = `${q.toLowerCase()}:${maxPages}`;
+  if (searchFullCache.has(key)) return searchFullCache.get(key);
 
-  try {
+  const promise = (async () => {
     loadMovies();
     const localHits = searchLocalCatalog(movies, q);
 
@@ -215,21 +215,51 @@ app.get('/api/search', async (req, res) => {
     );
     const merged = mergeSearchResults(localHits, remoteHits, q);
     const enhanced = await enrichSearchResults(merged, { tmdbKey: TMDB_API_KEY }, 36);
+    return enhanced;
+  })();
+
+  searchFullCache.set(key, promise);
+  return promise;
+}
+
+/** Fast search: local + TMDB + imdbapi (+ OMDb fallback) — paginated when page/limit set */
+app.get('/api/search', async (req, res) => {
+  const q = (req.query.q || '').trim();
+  const maxPages = Math.min(parseInt(req.query.pages, 10) || 10, 15);
+  const page = Math.max(1, parseInt(req.query.page, 10) || 0);
+  const limit = Math.min(48, Math.max(12, parseInt(req.query.limit, 10) || 24));
+
+  if (!q) return res.json({ results: [], total: 0, hasMore: false, page: 1 });
+
+  try {
+    const all = await fetchFullSearchResults(q, maxPages);
+
+    if (!page) {
+      res.json({
+        results: all,
+        total: all.length,
+        hasMore: false,
+        page: 1,
+        source: 'all',
+      });
+      return;
+    }
+
+    const start = (page - 1) * limit;
+    const slice = all.slice(start, start + limit);
+    const hasMore = start + slice.length < all.length;
 
     res.json({
-      results: enhanced,
-      total: enhanced.length,
-      source: 'all',
-      counts: {
-        local: localHits.length,
-        tmdb: tmdbHits.length,
-        imdbapi: imdbHits.length,
-        omdb: omdbHits.length,
-      },
+      results: slice,
+      total: all.length,
+      page,
+      limit,
+      hasMore,
+      source: 'page',
     });
   } catch (err) {
     console.error('[search]', err);
-    res.status(500).json({ results: [], total: 0, error: 'Search failed' });
+    res.status(500).json({ results: [], total: 0, hasMore: false, error: 'Search failed' });
   }
 });
 
@@ -332,55 +362,54 @@ function genreMovies(genreNeedle, type = 'movie') {
 }
 
 let rowsPayloadCache = { data: null, at: 0 };
-const ROWS_API_CACHE_MS = 60_000;
+const ROWS_API_CACHE_MS = 5 * 60_000;
+
+function buildRowsPayload() {
+  loadMovies();
+  const seed = rotateSeed();
+  const catalog = activeCatalog();
+  const featureFilms = catalog.filter((m) => m.type === 'movie');
+  const tvShows = catalog.filter((m) => m.type === 'tv');
+  const indianPool = featureFilms.filter((m) =>
+    ['Jawan', 'Pathaan', 'Animal', 'RRR', 'KGF', 'Vikram', 'Leo', 'Pushpa', 'Kantara', 'Dhurandhar'].some((k) =>
+      (m.title || '').includes(k)
+    )
+  );
+  const heroPool = buildHeroPool(seed);
+  const hero = heroPool[0] || catalog[0] || null;
+  const topRated = [...featureFilms].sort((a, b) => parseFloat(b.rating || 0) - parseFloat(a.rating || 0));
+
+  const rows = [
+    { id: 'top10', title: 'Top 10 Movies Today', variant: 'top10', movies: pickMovies(featureFilms, 8, seed + 10) },
+    { id: 'trending', title: 'Trending Now', movies: pickMovies(featureFilms, 12, seed + 20) },
+    { id: 'toprated', title: 'Top Rated Movies', movies: pickMovies(topRated, 12, seed + 30) },
+    { id: 'indian', title: 'Indian Blockbusters', movies: pickMovies(indianPool.length ? indianPool : featureFilms, 10, seed + 40) },
+    { id: 'tv', title: 'Popular TV Shows', movies: pickMovies(tvShows, 12, seed + 50) },
+    { id: 'recent', title: 'Recently Added', movies: pickMovies(movies.filter((m) => m.recent).length ? movies.filter((m) => m.recent) : featureFilms, 10, seed + 60) },
+    { id: 'action', title: 'Action & Thrillers', movies: pickMovies(genreMovies('action').length ? genreMovies('action') : featureFilms, 10, seed + 100) },
+    { id: 'binge', title: 'Binge-Worthy Series', movies: pickMovies(tvShows, 12, seed + 180) },
+  ];
+
+  return { hero, heroes: heroPool, rows };
+}
+
+try {
+  rowsPayloadCache = { data: buildRowsPayload(), at: Date.now() };
+} catch (err) {
+  console.warn('[rows] startup warm cache failed:', err?.message);
+}
 
 app.get('/api/rows', async (_req, res) => {
   try {
     const now = Date.now();
     if (rowsPayloadCache.data && now - rowsPayloadCache.at < ROWS_API_CACHE_MS) {
-      res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+      res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
       return res.json(rowsPayloadCache.data);
     }
 
-    loadMovies();
-    const seed = rotateSeed();
-    const catalog = activeCatalog();
-    const featureFilms = catalog.filter((m) => m.type === 'movie');
-    const tvShows = catalog.filter((m) => m.type === 'tv');
-    const indianPool = featureFilms.filter((m) =>
-      ['Jawan', 'Pathaan', 'Animal', 'RRR', 'KGF', 'Vikram', 'Leo', 'Pushpa', 'Kantara', 'Dhurandhar'].some((k) =>
-        (m.title || '').includes(k)
-      )
-    );
-    const heroPool = buildHeroPool(seed);
-    const hero = heroPool[0] || catalog[0] || null;
-
-    const topRated = [...featureFilms].sort((a, b) => parseFloat(b.rating || 0) - parseFloat(a.rating || 0));
-
-    const rows = [
-    { id: 'top10', title: 'Top 10 Movies Today', variant: 'top10', movies: pickMovies(featureFilms, 10, seed + 10) },
-    { id: 'trending', title: 'Trending Now', movies: pickMovies(featureFilms, 20, seed + 20) },
-    { id: 'toprated', title: 'Top Rated Movies', movies: pickMovies(topRated, 20, seed + 30) },
-    { id: 'indian', title: 'Indian Blockbusters', movies: pickMovies(indianPool.length ? indianPool : featureFilms, 18, seed + 40) },
-    { id: 'tv', title: 'Popular TV Shows', movies: pickMovies(tvShows, 20, seed + 50) },
-    { id: 'recent', title: 'Recently Added', movies: pickMovies(movies.filter((m) => m.recent).length ? movies.filter((m) => m.recent) : featureFilms, 18, seed + 60) },
-    { id: 'drama', title: 'Drama Movies', movies: pickMovies(genreMovies('drama').length ? genreMovies('drama') : featureFilms, 18, seed + 70) },
-    { id: 'scifi', title: 'Sci-Fi Movies', variant: 'landscape', explore: true, movies: pickMovies(genreMovies('sci').length ? genreMovies('sci') : featureFilms, 18, seed + 80) },
-    { id: 'horror', title: 'Horror Movies', movies: pickMovies(genreMovies('horror').length ? genreMovies('horror') : featureFilms, 18, seed + 90) },
-    { id: 'action', title: 'Action & Thrillers', movies: pickMovies(genreMovies('action').length ? genreMovies('action') : featureFilms, 18, seed + 100) },
-    { id: 'blockbuster', title: 'Hollywood Blockbusters', movies: pickMovies(featureFilms.filter((m) => !indianPool.includes(m)), 18, seed + 110) },
-    { id: 'comedy', title: 'Comedy Movies', movies: pickMovies(genreMovies('comedy').filter((m) => hasValidImage(m)).length ? genreMovies('comedy').filter((m) => hasValidImage(m)) : featureFilms, 18, seed + 120) },
-    { id: 'crime', title: 'Crime & Mystery', movies: pickMovies(genreMovies('crime').length ? genreMovies('crime') : featureFilms, 18, seed + 130) },
-    { id: 'romance', title: 'Romance & Drama', movies: pickMovies(genreMovies('romance').length ? genreMovies('romance') : featureFilms, 18, seed + 140) },
-    { id: 'animation', title: 'Animation & Family', movies: pickMovies(genreMovies('animation').length ? genreMovies('animation') : featureFilms, 18, seed + 150) },
-    { id: 'fantasy', title: 'Fantasy & Adventure', movies: pickMovies(genreMovies('fantasy').length ? genreMovies('fantasy') : featureFilms, 18, seed + 160) },
-    { id: 'marvel', title: 'Superhero Universe', movies: pickMovies(featureFilms.filter((m) => /avengers|iron man|black panther|guardians|spider-man|batman|joker|deadpool/i.test(m.title || '')), 18, seed + 170) },
-    { id: 'binge', title: 'Binge-Worthy Series', movies: pickMovies(tvShows, 20, seed + 180) },
-    ];
-
-    const payload = { hero, heroes: heroPool, rows };
+    const payload = buildRowsPayload();
     rowsPayloadCache = { data: payload, at: now };
-    res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+    res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
     res.json(payload);
   } catch (err) {
     console.error('/api/rows failed:', err);

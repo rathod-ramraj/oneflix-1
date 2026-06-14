@@ -2,6 +2,18 @@
 
 export const STREAM_HEX = 'ff4d6d';
 
+function screenscapeUrl({ imdbId, tmdbId, season, episode, isTv }) {
+  const params = new URLSearchParams({ type: isTv ? 'tv' : 'movie', lan: 'eng' });
+  if (imdbId) params.set('imdb', imdbId);
+  else if (tmdbId != null) params.set('tmdb', String(tmdbId));
+  else return null;
+  if (isTv) {
+    params.set('s', String(season || 1));
+    params.set('e', String(episode || 1));
+  }
+  return `https://nxsha.screenscape.me/embed?${params}`;
+}
+
 const SERVERS = [
   {
     name: '111movies',
@@ -11,6 +23,37 @@ const SERVERS = [
     default: true,
     movie: 'https://111movies.net/movie/{id}',
     tv: 'https://111movies.net/tv/{id}/{season}/{episode}',
+  },
+  {
+    name: 'vidcore',
+    label: 'VidCore — Auto play',
+    imdb: true,
+    tmdb: true,
+    movie: 'https://vidcore.net/movie/{id}?autoPlay=true&theme={hex}',
+    tv: 'https://vidcore.net/tv/{id}/{season}/{episode}?autoPlay=true&nextButton=true&autoNext=true&theme={hex}',
+  },
+  {
+    name: 'screenscape',
+    label: 'Screenscape — Multi lang',
+    imdb: true,
+    tmdb: true,
+    urlBuilder: screenscapeUrl,
+  },
+  {
+    name: 'vidnest',
+    label: 'VidNest — TMDB',
+    imdb: false,
+    tmdb: true,
+    movie: 'https://vidnest.fun/movie/{id}?server=gama',
+    tv: 'https://vidnest.fun/tv/{id}/{season}/{episode}?server=alfa&prevepisode=hide&nextepisode=hide',
+  },
+  {
+    name: 'vidfast',
+    label: 'Vidfast — Auto play',
+    imdb: true,
+    tmdb: true,
+    movie: 'https://vidfast.pro/movie/{id}?autoPlay=true',
+    tv: 'https://vidfast.pro/tv/{id}/{season}/{episode}?autoPlay=true&nextButton=true&autoNext=true',
   },
   {
     name: 'peachify',
@@ -85,36 +128,12 @@ const SERVERS = [
     tv: 'https://www.vidking.net/embed/tv/{id}/{season}/{episode}',
   },
   {
-    name: 'vidfast',
-    label: 'Vidfast — Auto play',
-    imdb: true,
-    tmdb: true,
-    movie: 'https://vidfast.pro/movie/{id}?autoPlay=true',
-    tv: 'https://vidfast.pro/tv/{id}/{season}/{episode}?autoPlay=true&nextButton=true&autoNext=true',
-  },
-  {
-    name: 'vidcore',
-    label: 'VidCore — Auto play',
-    imdb: true,
-    tmdb: true,
-    movie: 'https://vidcore.net/movie/{id}?autoPlay=true',
-    tv: 'https://vidcore.net/tv/{id}/{season}/{episode}?autoPlay=true&nextButton=true&autoNext=true',
-  },
-  {
     name: 'vidstorm',
     label: 'VidStorm',
     imdb: true,
     tmdb: true,
     movie: 'https://vidstorm.ru/movie/{id}',
     tv: 'https://vidstorm.ru/tv/{id}/{season}/{episode}',
-  },
-  {
-    name: 'vidnest',
-    label: 'Vidnest',
-    imdb: false,
-    tmdb: true,
-    movie: 'https://vidnest.fun/movie/{id}',
-    tv: 'https://vidnest.fun/tv/{id}/{season}/{episode}',
   },
   {
     name: 'vidlink',
@@ -171,24 +190,33 @@ export function parseMediaId(raw) {
 export function buildStreamProviders(movie, season, episode, { hex = STREAM_HEX } = {}) {
   const { imdbId, tmdbId, type } = movie || {};
   const isTv = type === 'tv' && season && episode;
+  const ctx = {
+    imdbId,
+    tmdbId,
+    season: season || 1,
+    episode: episode || 1,
+    hex,
+    isTv,
+  };
 
   const providers = [];
   for (const server of SERVERS) {
-    const id = streamIdForServer(server, { imdbId, tmdbId });
-    if (!id) continue;
-
-    const template = isTv ? server.tv : server.movie;
-    if (!template) continue;
+    let url = null;
+    if (typeof server.urlBuilder === 'function') {
+      url = server.urlBuilder(ctx);
+    } else {
+      const id = streamIdForServer(server, { imdbId, tmdbId });
+      if (!id) continue;
+      const template = isTv ? server.tv : server.movie;
+      if (!template) continue;
+      url = fillTemplate(template, { id, ...ctx });
+    }
+    if (!url) continue;
 
     providers.push({
       name: server.name,
       label: server.label,
-      url: fillTemplate(template, {
-        id,
-        season: season || 1,
-        episode: episode || 1,
-        hex,
-      }),
+      url,
     });
   }
 
@@ -205,9 +233,12 @@ export function buildStreamProviders(movie, season, episode, { hex = STREAM_HEX 
 }
 
 export const ALLOWED_EMBED_HOSTS = [
-  ...new Set(
-    SERVERS.flatMap((s) => [s.movie, s.tv].filter(Boolean).map((u) => new URL(u.replace(/\{[^}]+\}/g, 'x')).hostname)),
-  ),
+  ...new Set([
+    ...SERVERS.flatMap((s) =>
+      [s.movie, s.tv].filter(Boolean).map((u) => new URL(u.replace(/\{[^}]+\}/g, 'x')).hostname),
+    ),
+    'nxsha.screenscape.me',
+  ]),
 ];
 
 const PROBE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
-import { useReducedMotion, motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import './index.css';
 
 import Navbar from './components/Navbar';
@@ -14,24 +14,61 @@ const Player = lazy(() => import('./components/Player'));
 const SearchPage = lazy(() => import('./components/SearchPage'));
 const ImdbIdWatch = lazy(() => import('./components/ImdbIdWatch'));
 
-import { fetchRows, fetchMovie, getContinueWatching, getSavedResume } from './utils/api';
+import { getContinueWatching, getSavedResume, prefetchStream } from './utils/api';
 import { getMyList } from './utils/myList';
 import { movieMatchesLanguage, languageLabel, LANGUAGES } from './utils/languages';
-import { proxiedEmbedUrl } from './utils/stream';
-import { fetchStreamProviders } from './utils/api';
+import { getHomeData, loadHomeOnce, resetHomeBootstrap, persistHomeSnapshot } from './utils/homeStore';
 
 const PAGE = { HOME: 'home', SEARCH: 'search' };
 const HERO_EXCLUDE = (m) =>
   m?.imdbId === 'tt4154796' || /avengers:\s*endgame/i.test(m?.title || '');
 
+function buildHeroPool(data) {
+  const seen = new Set();
+  const pool = [];
+  const add = (m) => {
+    if (!m?.imdbId || seen.has(m.imdbId) || HERO_EXCLUDE(m)) return;
+    seen.add(m.imdbId);
+    pool.push(m);
+  };
+  if (data?.hero) add(data.hero);
+  if (data?.heroes?.length) data.heroes.forEach(add);
+  return pool.filter((m) => m?.imdbId && (m.poster || m.backdrop));
+}
+
+function resolveHero(data, pool) {
+  const fromApi = data?.hero;
+  if (fromApi && !HERO_EXCLUDE(fromApi)) return fromApi;
+  return (
+    pool.find((m) => m.imdbId === 'tt37287335') ||
+    pool.find((m) => m.title === 'Obsession') ||
+    pool.find((m) => m.title === 'Stranger Things') ||
+    pool.find((m) => m.imdbId === 'tt4574334') ||
+    pool[0] ||
+    null
+  );
+}
+
+function resolveHomeBootstrap() {
+  const data = getHomeData();
+  if (!data?.rows?.length) return { rows: [], hero: null, pool: [] };
+  const pool = buildHeroPool(data);
+  const list = data.rows;
+  const fallbackHero = list.flatMap((r) => r.movies || []).find((m) => m?.imdbId && !HERO_EXCLUDE(m));
+  const hero = resolveHero(data, pool) || fallbackHero || null;
+  return {
+    rows: list,
+    hero,
+    pool: pool.length ? pool : (hero ? [hero] : []),
+  };
+}
+
 export default function App() {
+  const boot = useMemo(() => resolveHomeBootstrap(), []);
   const [page, setPage] = useState(PAGE.HOME);
   const [navActive, setNavActive] = useState('home');
-  const [rows, setRows] = useState([]);
-  const [loadingRows, setLoadingRows] = useState(true);
-  const [heroMovie, setHeroMovie] = useState(null);
-  const [heroPool, setHeroPool] = useState([]);
-  const heroIndexRef = useRef(0);
+  const [rows, setRows] = useState(boot.rows);
+  const [heroMovie, setHeroMovie] = useState(boot.hero);
   const [modal, setModal] = useState(null);
   const [playerMovie, setPlayerMovie] = useState(null);
   const [playerSeason, setPlayerSeason] = useState(1);
@@ -40,10 +77,8 @@ export default function App() {
   const [filteredMovies, setFilteredMovies] = useState(null);
   const [selectedLanguage, setSelectedLanguage] = useState(LANGUAGES[0].id);
   const [myList, setMyList] = useState(() => getMyList());
-  const [continueWatching, setContinueWatching] = useState([]);
-  const preloadRef = useRef(null);
+  const [continueWatching, setContinueWatching] = useState(() => getContinueWatching());
   const toastTimer = useRef(null);
-  const reducedMotion = useReducedMotion();
 
   const showToast = useCallback((msg) => {
     setToastMsg(msg);
@@ -51,98 +86,35 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToastMsg(''), 2800);
   }, []);
 
-  const resolveHero = useCallback((data, pool) => {
-    const fromApi = data.hero;
-    if (fromApi && !HERO_EXCLUDE(fromApi)) return fromApi;
-    return (
-      pool.find((m) => m.imdbId === 'tt37287335') ||
-      pool.find((m) => m.title === 'Obsession') ||
-      pool.find((m) => m.title === 'Stranger Things') ||
-      pool.find((m) => m.imdbId === 'tt4574334') ||
-      pool[0] ||
-      null
-    );
+  const applyHomeData = useCallback((data) => {
+    const list = Array.isArray(data?.rows) ? data.rows : [];
+    if (!list.length) return;
+    const pool = buildHeroPool(data);
+    const fallbackHero = list.flatMap((r) => r.movies || []).find((m) => m?.imdbId && !HERO_EXCLUDE(m));
+    const hero = resolveHero(data, pool) || fallbackHero || null;
+    persistHomeSnapshot(data);
+    setRows(list);
+    if (hero) setHeroMovie(hero);
   }, []);
-
-  const buildHeroPool = useCallback((data) => {
-    const seen = new Set();
-    const pool = [];
-    const add = (m) => {
-      if (!m?.imdbId || seen.has(m.imdbId) || HERO_EXCLUDE(m)) return;
-      seen.add(m.imdbId);
-      pool.push(m);
-    };
-    if (data.hero) add(data.hero);
-    if (data.heroes?.length) data.heroes.forEach(add);
-    return pool;
-  }, []);
-
-  const loadHomeRows = useCallback(async (silent = false) => {
-    try {
-      const data = await fetchRows({ fresh: silent });
-      const list = Array.isArray(data?.rows) ? data.rows : [];
-      const pool = buildHeroPool(data).filter(
-        (m) => !HERO_EXCLUDE(m) && m?.imdbId && (m.poster || m.backdrop),
-      );
-      const fallbackHero = list.flatMap((r) => r.movies || []).find((m) => m?.imdbId && !HERO_EXCLUDE(m));
-      const hero = resolveHero(data, pool) || fallbackHero || null;
-
-      if (list.length) setRows(list);
-      if (hero) {
-        if (!silent) {
-          setHeroPool(pool.length ? pool : [hero]);
-          heroIndexRef.current = 0;
-          setHeroMovie(hero);
-        } else {
-          setHeroPool((prev) => {
-            const merged = prev.filter((m) => !HERO_EXCLUDE(m));
-            (pool.length ? pool : [hero]).forEach((m) => {
-              if (!merged.some((x) => x.imdbId === m.imdbId)) merged.push(m);
-            });
-            return merged.length ? merged : [hero];
-          });
-          setHeroMovie((current) => {
-            if (!current?.imdbId) return hero;
-            const fresh = pool.find((m) => m.imdbId === current.imdbId) || hero;
-            const idx = pool.findIndex((m) => m.imdbId === fresh.imdbId);
-            if (idx >= 0) heroIndexRef.current = idx;
-            return fresh;
-          });
-        }
-      } else if (!silent) {
-        setHeroMovie(null);
-      }
-    } catch (e) {
-      console.error(e);
-      if (!silent) showToast('Could not load catalog — is the backend running?');
-    } finally {
-      setLoadingRows(false);
-    }
-  }, [showToast, buildHeroPool, resolveHero]);
 
   useEffect(() => {
-    loadHomeRows();
-    setContinueWatching(getContinueWatching());
+    loadHomeOnce()
+      .then((data) => {
+        if (data?.rows?.length) applyHomeData(data);
+      })
+      .catch(() => {});
+  }, [applyHomeData]);
+
+  useEffect(() => {
     const refreshCw = () => setContinueWatching(getContinueWatching());
     window.addEventListener('sf-cw-update', refreshCw);
-    const timer = setInterval(() => {
-      if (page === PAGE.HOME) loadHomeRows(true);
-    }, 60 * 1000);
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener('sf-cw-update', refreshCw);
-    };
-  }, [loadHomeRows, page]);
+    return () => window.removeEventListener('sf-cw-update', refreshCw);
+  }, []);
 
-  useEffect(() => {
-    if (page !== PAGE.HOME || filteredMovies || heroPool.length < 2) return undefined;
-    const timer = setInterval(() => {
-      heroIndexRef.current = (heroIndexRef.current + 1) % heroPool.length;
-      const next = heroPool[heroIndexRef.current];
-      if (next && !HERO_EXCLUDE(next)) setHeroMovie(next);
-    }, 8000);
-    return () => clearInterval(timer);
-  }, [page, filteredMovies, heroPool]);
+  const retryHomeLoad = useCallback(() => {
+    resetHomeBootstrap();
+    loadHomeOnce().then(applyHomeData).catch(() => showToast('Could not load catalog'));
+  }, [applyHomeData, showToast]);
 
   const handleNavigate = useCallback((id) => {
     setNavActive(id);
@@ -170,9 +142,14 @@ export default function App() {
   const handlePlay = useCallback((movie, opts = {}) => {
     setModal(null);
     const saved = getSavedResume(movie);
+    const isTv = movie?.type === 'tv';
+    const s = opts.season ?? saved?.season ?? 1;
+    const e = opts.episode ?? saved?.episode ?? 1;
+    prefetchStream(movie, isTv ? s : null, isTv ? e : null);
+    import('./components/Player');
     setPlayerMovie(movie);
-    setPlayerSeason(opts.season ?? saved?.season ?? 1);
-    setPlayerEpisode(opts.episode ?? saved?.episode ?? 1);
+    setPlayerSeason(s);
+    setPlayerEpisode(e);
     document.body.style.overflow = 'hidden';
     showToast(`Now playing: ${movie.title}`);
   }, [showToast]);
@@ -189,38 +166,15 @@ export default function App() {
     showToast(`S${season} E${episode}`);
   }, [showToast]);
 
-  const handleInfo = useCallback(async (movie) => {
+  const handleInfo = useCallback((movie) => {
     setModal(movie);
     document.body.style.overflow = 'hidden';
-    try {
-      const full = await fetchMovie(movie.imdbId);
-      if (full) setModal(full);
-    } catch { /* keep partial */ }
   }, []);
 
   const closeModal = useCallback(() => {
     setModal(null);
     if (!playerMovie) document.body.style.overflow = '';
   }, [playerMovie]);
-
-  const handleHoverPreload = useCallback(async (movie) => {
-    try {
-      const lookupId = movie.imdbId || (movie.tmdbId != null ? String(movie.tmdbId) : null);
-      if (!lookupId) return;
-      const data = await fetchStreamProviders(lookupId);
-      const url = data.providers?.[0]?.url;
-      if (!url || preloadRef.current) return;
-      const iframe = document.createElement('iframe');
-      iframe.src = proxiedEmbedUrl(url);
-      iframe.style.cssText = 'position:absolute;width:0;height:0;opacity:0;pointer-events:none';
-      document.body.appendChild(iframe);
-      preloadRef.current = iframe;
-      setTimeout(() => {
-        iframe.remove();
-        preloadRef.current = null;
-      }, 8000);
-    } catch { /* ignore */ }
-  }, []);
 
   const refreshMyList = useCallback(() => setMyList(getMyList()), []);
 
@@ -269,104 +223,74 @@ export default function App() {
     return filtered;
   }, [rows, filteredMovies, myList, selectedLanguage]);
 
-  useEffect(() => {
-    if (!rows.length) return;
-
-    const pool = displayRows.flatMap((r) => r.movies);
-    if (!pool.length) return;
-
-    const pick =
-      filteredMovies === 'movie'
-        ? pool.find((m) => m.type === 'movie')
-        : filteredMovies === 'tv'
-          ? pool.find((m) => m.type === 'tv')
-          : pool[0];
-
-    if (pick && filteredMovies) setHeroMovie(pick);
-  }, [filteredMovies, rows, displayRows]);
+  const displayHero = useMemo(() => {
+    if (heroMovie) return heroMovie;
+    return rows.flatMap((r) => r.movies || []).find((m) => m?.imdbId && !HERO_EXCLUDE(m)) || null;
+  }, [heroMovie, rows]);
 
   const browseContent = (
-    <motion.div
-      key={`${page}-${filteredMovies || 'all'}`}
-      initial={false}
-      animate={{ opacity: 1, y: 0 }}
-    >
+    <motion.div initial={false} animate={{ opacity: 1, y: 0 }}>
       <Navbar active={navActive} onNavigate={handleNavigate} onSearch={handleSearchNav} />
-      {page === PAGE.SEARCH ? (
-        <>
-          <Suspense fallback={null}>
-            <SearchPage onPlay={handlePlay} onInfo={handleInfo} onHoverPreload={handleHoverPreload} />
-          </Suspense>
-          <Footer />
-        </>
-      ) : (
-        <>
-          <Hero movie={heroMovie} onPlay={handlePlay} onInfo={handleInfo} />
-          <motion.main
-            className="main-content"
-            initial={reducedMotion ? false : { opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.35, delay: 0.08 }}
-          >
-            {filteredMovies === 'languages' && (
-              <LanguagesBrowse
-                active={selectedLanguage}
-                onChange={setSelectedLanguage}
-              />
-            )}
-            {continueWatching.length > 0 && !filteredMovies && (
-              <MovieRow
-                eager
-                title="Continue Watching"
-                variant="continue"
-                movies={continueWatching.map((m) => ({
-                  ...m,
-                  episodeLabel: m.type === 'tv' ? `S${m.season || 1} E${m.episode || 1}` : null,
-                }))}
-                loading={false}
-                onPlay={(m) => handlePlay(m, { season: m.season, episode: m.episode })}
-                onInfo={handleInfo}
-                onHoverPreload={handleHoverPreload}
-              />
-            )}
-            {displayRows.map((row, i) => (
-              <MovieRow
-                key={row.id}
-                eager={i < 4}
-                title={row.title}
-                movies={row.movies}
-                variant={row.variant || 'landscape'}
-                exploreLink={row.explore}
-                loading={loadingRows}
-                onPlay={handlePlay}
-                onInfo={handleInfo}
-                onHoverPreload={handleHoverPreload}
-              />
-            ))}
-            {filteredMovies === 'mylist' && !myList.length && (
-              <p className="browse-empty">Your list is empty. Open a title and tap + to add it.</p>
-            )}
-            {!loadingRows && !displayRows.length && !filteredMovies && (
-              <p className="browse-empty">
-                Nothing loaded yet.{' '}
-                <button type="button" className="row-explore" onClick={() => { setLoadingRows(true); loadHomeRows(); }}>
-                  Retry
-                </button>
-              </p>
-            )}
-            {filteredMovies === 'languages' && !displayRows.length && !loadingRows && (
-              <p className="browse-empty">No titles found for {languageLabel(selectedLanguage)}.</p>
-            )}
-          </motion.main>
-          <Footer />
-        </>
+
+      <div className="home-static-layer" hidden={page === PAGE.SEARCH} aria-hidden={page === PAGE.SEARCH}>
+        <Hero movie={displayHero} onPlay={handlePlay} onInfo={handleInfo} />
+        <motion.main className="main-content" initial={false} animate={{ opacity: 1 }}>
+          {filteredMovies === 'languages' && (
+            <LanguagesBrowse active={selectedLanguage} onChange={setSelectedLanguage} />
+          )}
+          {continueWatching.length > 0 && !filteredMovies && (
+            <MovieRow
+              title="Continue Watching"
+              variant="continue"
+              movies={continueWatching.map((m) => ({
+                ...m,
+                episodeLabel: m.type === 'tv' ? `S${m.season || 1} E${m.episode || 1}` : null,
+              }))}
+              onPlay={(m) => handlePlay(m, { season: m.season, episode: m.episode })}
+              onInfo={handleInfo}
+            />
+          )}
+          {displayRows.map((row) => (
+            <MovieRow
+              key={row.id}
+              title={row.title}
+              movies={row.movies}
+              variant={row.variant || 'landscape'}
+              exploreLink={row.explore}
+              onPlay={handlePlay}
+              onInfo={handleInfo}
+            />
+          ))}
+          {filteredMovies === 'mylist' && !myList.length && (
+            <p className="browse-empty">Your list is empty. Open a title and tap + to add it.</p>
+          )}
+          {!displayRows.length && !filteredMovies && !rows.length && (
+            <p className="browse-empty">
+              Could not load catalog.{' '}
+              <button type="button" className="row-explore" onClick={retryHomeLoad}>Retry</button>
+            </p>
+          )}
+          {filteredMovies === 'languages' && !displayRows.length && rows.length > 0 && (
+            <p className="browse-empty">No titles found for {languageLabel(selectedLanguage)}.</p>
+          )}
+        </motion.main>
+      </div>
+
+      {page === PAGE.SEARCH && (
+        <Suspense fallback={null}>
+          <SearchPage onPlay={handlePlay} onInfo={handleInfo} />
+        </Suspense>
       )}
+
+      <Footer />
     </motion.div>
   );
 
   return (
     <>
-      {!playerMovie && browseContent}
+      <div className={playerMovie ? 'browse-shell browse-shell--under-player' : 'browse-shell'}>
+        {browseContent}
+      </div>
 
       <Suspense fallback={null}>
         <AnimatePresence>

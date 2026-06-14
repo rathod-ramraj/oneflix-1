@@ -8,6 +8,9 @@ import {
   isDirectImageUrl,
   isSameImageUrl,
 } from './imageUrls';
+import { buildClientRows } from './catalogRows';
+import { getOfflineHome } from './offlineHome';
+import { getMovieFromCatalog } from './movieCatalog';
 const CACHE_KEY = 'sf_movie_cache_v6';
 export const PLACEHOLDER = 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=640&q=80';
 
@@ -58,34 +61,27 @@ async function apiFetch(path, options = {}, retries = 2) {
   return null;
 }
 
-function buildClientRows(movies) {
-  if (!Array.isArray(movies) || !movies.length) {
-    return { hero: null, heroes: [], rows: [] };
-  }
-  const featureFilms = movies.filter((m) => m.type === 'movie' && m.poster);
-  const tvShows = movies.filter((m) => m.type === 'tv' && m.poster);
-  const recent = movies.filter((m) => m.recent && m.poster);
-  const hero = movies.find((m) => m.featured) || movies[0];
-  const heroes = (recent.length ? recent : movies).slice(0, 12);
-  const rows = [
-    { id: 'trending', title: 'Trending Now', movies: featureFilms.slice(0, 20) },
-    { id: 'tv', title: 'Popular TV Shows', movies: tvShows.slice(0, 20) },
-    { id: 'recent', title: 'Recently Added', movies: (recent.length ? recent : featureFilms).slice(0, 18) },
-    {
-      id: 'top10',
-      title: 'Top 10 Movies Today',
-      variant: 'top10',
-      movies: [...featureFilms]
-        .sort((a, b) => parseFloat(b.rating || 0) - parseFloat(a.rating || 0))
-        .slice(0, 10),
-    },
-  ].filter((r) => r.movies.length);
-  return { hero, heroes, rows };
-}
+const posterFailCache = new Set();
+const backdropFailCache = new Set();
 
 export function getPosterApiUrl(movie) {
   const id = movie?.imdbId || movie?.imdbID;
-  return id ? `${API_PREFIX}/poster/${id}` : null;
+  if (!id || posterFailCache.has(id)) return null;
+  return `${API_PREFIX}/poster/${id}`;
+}
+
+export function getBackdropApiUrl(movie) {
+  const id = movie?.imdbId || movie?.imdbID;
+  if (!id || backdropFailCache.has(id)) return null;
+  return `${API_PREFIX}/backdrop/${id}`;
+}
+
+export function markPosterFailed(id) {
+  if (id) posterFailCache.add(String(id));
+}
+
+export function markBackdropFailed(id) {
+  if (id) backdropFailCache.add(String(id));
 }
 
 function isGenericPlaceholder(url) {
@@ -96,14 +92,14 @@ export function getPoster(movie) {
   const local = upgradePosterUrl(movie?.poster || movie?.Poster || movie?.primaryImage?.url);
   if (local && String(local).startsWith('/')) return local;
   if (isDirectImageUrl(local) && !isGenericPlaceholder(local)) return local;
-  return getPosterApiUrl(movie) || PLACEHOLDER;
+  return PLACEHOLDER;
 }
 
 export function getBackdrop(movie) {
-  const id = movie?.imdbId || movie?.imdbID;
-  if (id) return `${API_PREFIX}/backdrop/${id}`;
   const resolved = upgradeBackdropUrl(movie?.backdrop || movie?.Backdrop);
   if (isDirectImageUrl(resolved) && !isGenericPlaceholder(resolved)) return resolved;
+  const poster = upgradePosterUrl(movie?.poster || movie?.Poster || movie?.primaryImage?.url);
+  if (isDirectImageUrl(poster) && !isGenericPlaceholder(poster)) return poster;
   return PLACEHOLDER;
 }
 
@@ -112,7 +108,31 @@ export async function fetchHeroImages(imdbId) {
 }
 
 /**
- * Fast search via imdbapi.dev (backend proxy).
+ * Paginated search — one page per request until hasMore=false.
+ * Full result set is cached on the server after the first page.
+ */
+export async function searchMoviesPage(query, page = 1, options = {}) {
+  const q = query?.trim();
+  if (!q) return { results: [], total: 0, hasMore: false, page: 1 };
+
+  if (options.signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
+
+  const params = new URLSearchParams({ q, page: String(page), limit: String(options.limit || 24) });
+  if (options.pages) params.set('pages', String(options.pages));
+
+  const data = await apiFetch(`/search?${params}`, { signal: options.signal });
+  return {
+    results: data.results || [],
+    total: data.total ?? 0,
+    hasMore: Boolean(data.hasMore),
+    page: data.page || page,
+  };
+}
+
+/**
+ * Full search (legacy) — uses cache when available.
  * Supports AbortSignal + instant cache.
  * Returns { results, total }
  */
@@ -122,6 +142,10 @@ export async function searchMovies(query, options = {}) {
 
   const cached = getSearchCache(q);
   if (cached && !options.skipCache) return cached;
+
+  if (options.signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
 
   const params = new URLSearchParams({ q });
   params.set('pages', String(options.pages || 10));
@@ -136,15 +160,9 @@ export async function searchMovies(query, options = {}) {
   return payload;
 }
 
-/** Preload popular queries into cache (non-blocking) */
+/** Preload disabled — avoids background API calls after first load */
 export function preloadPopularSearches() {
-  if (popularPreloadStarted) return;
-  popularPreloadStarted = true;
-
-  POPULAR_SEARCHES.forEach((q) => {
-    if (getSearchCache(q)) return;
-    searchMovies(q, { skipCache: false }).catch(() => {});
-  });
+  /* no-op */
 }
 
 export async function fetchAllMovies() {
@@ -157,9 +175,14 @@ export async function fetchAllMovies() {
 
 export async function fetchMovie(id) {
   const cacheKey = `movie:${id}`;
-  const cached = getCacheEntry(cacheKey);
+  const cached = getCacheEntry(cacheKey, 1000 * 60 * 60 * 24 * 7);
   if (cached) return cached;
-  const data = await apiFetch(`/movie/${encodeURIComponent(id)}`);
+  const local = getMovieFromCatalog(id);
+  if (local) {
+    setCacheEntry(cacheKey, local);
+    return local;
+  }
+  const data = await apiFetch(`/movie/${encodeURIComponent(id)}`, { timeout: 6_000 }, 0);
   setCacheEntry(cacheKey, data);
   return data;
 }
@@ -182,36 +205,105 @@ export async function fetchTrailer(id) {
 }
 
 let rowsCache = null;
-let rowsCacheAt = 0;
-const ROWS_CACHE_MS = 90_000;
+let rowsPromise = null;
+let rowsFrozen = false;
+
+function hydrateRowsCache() {
+  if (rowsCache?.rows?.length) return;
+  for (const key of ['sf_home_bootstrap_v1']) {
+    try {
+      const raw = sessionStorage.getItem(key) || localStorage.getItem(key);
+      if (!raw) continue;
+      const data = JSON.parse(raw);
+      if (data?.rows?.length) {
+        rowsCache = data;
+        rowsFrozen = true;
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+hydrateRowsCache();
+
+/** Keep api rows cache aligned with homeStore */
+export function syncRowsCache(data) {
+  if (data?.rows?.length) {
+    rowsCache = data;
+    rowsFrozen = true;
+  }
+}
+
+/** Sync read for instant first paint from prior session or movies cache */
+export function getInstantHomeFromCache() {
+  hydrateRowsCache();
+  if (rowsCache?.rows?.length) return rowsCache;
+  const movies = getCacheEntry('all');
+  if (movies?.length) {
+    const built = buildClientRows(movies);
+    if (built.rows.length) return built;
+  }
+  return getOfflineHome();
+}
+
+/** @deprecated use warmHomeCache from homeStore */
+export function prefetchHomeCatalog() {
+  /* warmHomeCache() runs on homeStore import */
+}
+
+export function resetRowsCache() {
+  rowsCache = null;
+  rowsPromise = null;
+  rowsFrozen = false;
+}
 
 export async function fetchRows({ fresh = false } = {}) {
-  if (!fresh && rowsCache?.rows?.length && Date.now() - rowsCacheAt < ROWS_CACHE_MS) {
+  if (fresh) resetRowsCache();
+  if (!fresh && rowsFrozen && rowsCache?.rows?.length) return rowsCache;
+  if (!fresh && rowsCache?.rows?.length) {
+    rowsFrozen = true;
     return rowsCache;
   }
-  try {
-    const data = await apiFetch('/rows', { timeout: 20_000 });
-    if (Array.isArray(data?.rows) && data.rows.length) {
-      rowsCache = data;
-      rowsCacheAt = Date.now();
-      return data;
+  if (!fresh && rowsPromise) return rowsPromise;
+
+  const catalogQuick = fetchAllMovies()
+    .then((movies) => {
+      const built = buildClientRows(movies);
+      return built.rows.length ? built : null;
+    })
+    .catch(() => null);
+
+  rowsPromise = (async () => {
+    try {
+      const data = await apiFetch('/rows', { timeout: 8_000 }, 0);
+      if (Array.isArray(data?.rows) && data.rows.length) {
+        rowsCache = data;
+        rowsFrozen = true;
+        return data;
+      }
+    } catch {
+      /* fall through */
     }
-  } catch {
-    /* try catalog fallback */
-  }
-  if (rowsCache?.rows?.length) return rowsCache;
-  try {
-    const movies = await fetchAllMovies();
-    const fallback = buildClientRows(movies);
-    if (fallback.rows.length) {
-      rowsCache = fallback;
-      rowsCacheAt = Date.now();
-      return fallback;
+    const quick = await catalogQuick;
+    if (quick?.rows?.length) {
+      rowsCache = quick;
+      rowsFrozen = true;
+      return quick;
     }
-  } catch {
-    /* ignore */
+    if (rowsCache?.rows?.length) {
+      rowsFrozen = true;
+      return rowsCache;
+    }
+    throw new Error('Could not load catalog');
+  })();
+
+  try {
+    return await rowsPromise;
+  } finally {
+    rowsPromise = null;
   }
-  throw new Error('Could not load catalog');
 }
 
 /** Fetch episodes — works with tmdbId OR imdbId */
@@ -271,18 +363,32 @@ export async function fetchMovieImages(imdbId) {
   }
 }
 
+const streamCache = new Map();
+
+export function prefetchStream(movie, season = null, episode = null) {
+  const id = movie?.imdbId || (movie?.tmdbId != null ? String(movie.tmdbId) : null);
+  if (!id) return;
+  fetchStreamProviders(id, season, episode).catch(() => {});
+}
+
 export async function fetchStreamProviders(id, season, episode) {
+  const key = `${id}:${season || ''}:${episode || ''}`;
+  if (streamCache.has(key)) return streamCache.get(key);
+
   let path = `/stream/${encodeURIComponent(id)}`;
   const params = new URLSearchParams();
   if (season) params.set('season', season);
   if (episode) params.set('episode', episode);
   if (params.toString()) path += `?${params}`;
-  return apiFetch(path);
+
+  const data = await apiFetch(path, { timeout: 6_000 }, 0);
+  streamCache.set(key, data);
+  return data;
 }
 
 export async function probeStreamUrl(url) {
   try {
-    const data = await apiFetch(`/probe?url=${encodeURIComponent(url)}`);
+    const data = await apiFetch(`/probe?url=${encodeURIComponent(url)}`, { timeout: 4_000 }, 0);
     return data.ok === true;
   } catch {
     return false;
@@ -290,8 +396,11 @@ export async function probeStreamUrl(url) {
 }
 
 export async function probeStreamUrls(urls) {
-  const results = await Promise.all(urls.map((url) => probeStreamUrl(url)));
-  return results;
+  if (!urls.length) return [];
+  const first = await probeStreamUrl(urls[0]);
+  if (urls.length === 1) return [first];
+  const rest = await Promise.all(urls.slice(1).map((url) => probeStreamUrl(url)));
+  return [first, ...rest];
 }
 
 const PROGRESS_KEY = 'sf_progress_v1';

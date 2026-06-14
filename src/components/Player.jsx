@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { fetchStreamProviders, fetchEpisodes, fetchTvSeasons, saveWatchProgress, probeStreamUrls } from '../utils/api';
 import { proxiedEmbedUrl } from '../utils/stream';
 
-const LOAD_TIMEOUT = 12000;
+const LOAD_TIMEOUT = 10000;
 const VIDSRC_PROGRESS_KEY = 'vidsrcwtf-Progress';
 
 function streamLookupId(movie) {
@@ -31,7 +31,7 @@ export default function Player({
   const [seasonsMeta, setSeasonsMeta] = useState([]);
   const [loadingEps, setLoadingEps] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [probing, setProbing] = useState(false);
+  const [checkingServers, setCheckingServers] = useState(false);
   const iframeRef = useRef(null);
   const failTimerRef = useRef(null);
   const probeGenRef = useRef(0);
@@ -49,24 +49,23 @@ export default function Player({
     if (initEpisode != null) setEpisode(initEpisode);
   }, [initEpisode]);
 
-  const probeAndRank = useCallback(async (list) => {
-    if (!list.length) {
-      setProviders([]);
-      setProviderIndex(0);
-      setLoadFailed(true);
-      return;
-    }
+  const rankInBackground = useCallback(async (list) => {
+    if (!list.length) return;
     const gen = ++probeGenRef.current;
-    setProbing(true);
-    setLoadFailed(false);
+    setCheckingServers(true);
     const checks = await probeStreamUrls(list.map((p) => p.url));
     if (gen !== probeGenRef.current) return;
-    const ranked = sortProviders(list.map((p, i) => ({ ...p, working: checks[i] })));
-    const firstOk = ranked.findIndex((p) => p.working);
-    setProviders(ranked);
-    setProviderIndex(firstOk >= 0 ? firstOk : 0);
-    setLoadFailed(firstOk < 0);
-    setProbing(false);
+    setProviders((prev) => {
+      const ranked = sortProviders(
+        list.map((p, i) => ({ ...p, working: checks[i] })),
+      );
+      const firstOk = ranked.findIndex((p) => p.working);
+      if (firstOk >= 0 && firstOk !== providerIndexRef.current) {
+        setProviderIndex(firstOk);
+      }
+      return ranked.length ? ranked : prev;
+    });
+    setCheckingServers(false);
   }, []);
 
   const loadProviders = useCallback(async () => {
@@ -74,10 +73,23 @@ export default function Player({
     if (!lookupId) return;
     const s = isTv ? season : null;
     const e = isTv ? episode : null;
-    const data = await fetchStreamProviders(lookupId, s, e);
-    endedRef.current = false;
-    await probeAndRank(data.providers || []);
-  }, [movie, season, episode, isTv, probeAndRank]);
+    try {
+      const data = await fetchStreamProviders(lookupId, s, e);
+      const list = data.providers || [];
+      endedRef.current = false;
+      if (!list.length) {
+        setProviders([]);
+        setLoadFailed(true);
+        return;
+      }
+      setProviders(list);
+      setProviderIndex(0);
+      setLoadFailed(false);
+      rankInBackground(list);
+    } catch {
+      setLoadFailed(true);
+    }
+  }, [movie, season, episode, isTv, rankInBackground]);
 
   const loadSeasonsMeta = useCallback(async () => {
     const lookupId = streamLookupId(movie);
@@ -111,12 +123,10 @@ export default function Player({
   }, [loadProviders]);
 
   useEffect(() => {
+    if (!showEpisodes || !isTv) return;
     loadSeasonsMeta();
-  }, [loadSeasonsMeta]);
-
-  useEffect(() => {
     loadEpisodeList();
-  }, [loadEpisodeList]);
+  }, [showEpisodes, isTv, season, loadSeasonsMeta, loadEpisodeList]);
 
   const handleSeasonChange = (newSeason) => {
     const next = Number(newSeason);
@@ -131,7 +141,7 @@ export default function Player({
   }, [providerIndex]);
 
   const currentProvider = providers[providerIndex];
-  const embedSrc = currentProvider && !probing ? proxiedEmbedUrl(currentProvider.url) : '';
+  const embedSrc = currentProvider ? proxiedEmbedUrl(currentProvider.url) : '';
 
   const demoteAndTryNext = useCallback(() => {
     setProviders((prev) => {
@@ -139,23 +149,24 @@ export default function Player({
       const failedName = prev[providerIndexRef.current]?.name;
       const updated = prev.map((p) => (p.name === failedName ? { ...p, working: false } : p));
       const ranked = sortProviders(updated);
-      const nextIdx = ranked.findIndex((p) => p.working);
-      if (nextIdx >= 0) {
-        setProviderIndex(nextIdx);
+      const nextIdx = ranked.findIndex((p) => p.working !== false);
+      const tryIdx = nextIdx >= 0 ? nextIdx : (providerIndexRef.current + 1) % ranked.length;
+      if (tryIdx !== providerIndexRef.current) {
+        setProviderIndex(tryIdx);
         setLoadFailed(false);
       } else {
-        probeAndRank(prev.map((p) => ({ name: p.name, label: p.label, url: p.url })));
+        setLoadFailed(true);
       }
       return ranked;
     });
-  }, [probeAndRank]);
+  }, []);
 
   useEffect(() => {
     clearTimeout(failTimerRef.current);
-    if (!embedSrc || probing) return;
+    if (!embedSrc) return;
     failTimerRef.current = setTimeout(demoteAndTryNext, LOAD_TIMEOUT);
     return () => clearTimeout(failTimerRef.current);
-  }, [embedSrc, providerIndex, probing, demoteAndTryNext]);
+  }, [embedSrc, providerIndex, demoteAndTryNext]);
 
   const goToNextEpisode = useCallback(() => {
     if (!isTv) return;
@@ -281,7 +292,7 @@ export default function Player({
           >
             <motion.div className="server-panel-header">
               <span>
-                {probing ? 'Checking servers…' : workingCount ? `${workingCount} server${workingCount > 1 ? 's' : ''} online` : 'No servers responding'}
+                {checkingServers ? 'Checking servers…' : workingCount ? `${workingCount} server${workingCount > 1 ? 's' : ''} online` : 'Tap a server to switch'}
               </span>
               <button type="button" className="control-btn" onClick={() => setShowServer(false)}>Hide</button>
             </motion.div>
@@ -290,7 +301,7 @@ export default function Player({
                 <button
                   key={p.name}
                   type="button"
-                  className={`server-option${i === providerIndex ? ' active' : ''}${p.working ? ' server-ok' : ' server-fail'}`}
+                  className={`server-option${i === providerIndex ? ' active' : ''}${p.working ? ' server-ok' : p.working === false ? ' server-fail' : ''}`}
                   onClick={() => pickServer(i)}
                 >
                   <span className={`server-dot${p.working ? ' ok' : ''}`} />
@@ -300,16 +311,14 @@ export default function Player({
               ))}
             </div>
             {loadFailed && (
-              <p className="server-hint" style={{ color: '#ff6b6b' }}>All servers failed — try again later.</p>
+              <p className="server-hint" style={{ color: '#ff6b6b' }}>All servers failed — try another server.</p>
             )}
           </motion.div>
         )}
       </AnimatePresence>
 
       <motion.div className="player-frame-wrap">
-        {probing ? (
-          <motion.div className="player-loading">Finding working server…</motion.div>
-        ) : embedSrc ? (
+        {embedSrc ? (
           <iframe
             ref={iframeRef}
             key={`${currentProvider?.name}-${season}-${episode}`}

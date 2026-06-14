@@ -433,6 +433,12 @@ a:focus:not(:focus-visible) {
   overflow: hidden;
 }
 
+.hero-bg--idle {
+  background: linear-gradient(180deg, #1a1a1a 0%, #0a0a0a 55%, #000 100%);
+  filter: none;
+  animation: none;
+}
+
 .hero-bg-img {
   width: 100%;
   height: 100%;
@@ -550,6 +556,19 @@ a:focus:not(:focus-visible) {
 
 .btn-info:active {
   transform: scale(0.97);
+}
+
+/* Home stays mounted — hidden layers, never unmounted on nav/player */
+.home-static-layer[hidden] {
+  display: none !important;
+}
+
+.browse-shell--under-player {
+  visibility: hidden;
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
 }
 
 /* ——— Content rows ——— */
@@ -1038,6 +1057,27 @@ a:focus:not(:focus-visible) {
   color: #fff;
   font-size: 0.95rem;
   cursor: pointer;
+}
+
+.infinite-scroll-sentinel {
+  min-height: 1px;
+  padding: 1rem 0 2rem;
+}
+
+.infinite-scroll-loader {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.75rem;
+  max-width: 720px;
+  margin: 0 auto;
+  opacity: 0.7;
+}
+
+.search-end-label {
+  text-align: center;
+  color: var(--txt-muted);
+  font-size: 0.85rem;
+  margin: 1rem 0 2rem;
 }
 
 /* ——— Player ——— */

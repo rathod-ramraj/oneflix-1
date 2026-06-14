@@ -1,119 +1,156 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { searchMovies, preloadPopularSearches } from '../utils/api';
-import { getSearchCache, getSearchSuggestions } from '../utils/searchCache';
+import { searchMoviesPage } from '../utils/api';
+import { getSearchCache, setSearchCache, getSearchSuggestions } from '../utils/searchCache';
+import { usePaginatedLoad } from '../hooks/usePaginatedLoad';
 import MovieCard from './MovieCard';
 
 const DEBOUNCE_MS = 300;
 const PAGE_SIZE = 24;
 
-export default function SearchPage({ onPlay, onInfo, onHoverPreload }) {
+export default function SearchPage({ onPlay, onInfo }) {
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState([]);
+  const [activeQuery, setActiveQuery] = useState('');
   const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
   const [fromCache, setFromCache] = useState(false);
   const [error, setError] = useState('');
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [suggestions, setSuggestions] = useState([]);
 
   const timerRef = useRef(null);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
+  const activeQueryRef = useRef('');
+  const completedQueryRef = useRef('');
+
+  activeQueryRef.current = activeQuery;
+
+  const fetchPage = useCallback(async (page) => {
+    const q = activeQueryRef.current;
+    if (!q) return { results: [], hasMore: false };
+
+    const data = await searchMoviesPage(q, page, {
+      signal: abortRef.current?.signal,
+      limit: PAGE_SIZE,
+    });
+
+    if (page === 1) setTotal(data.total);
+
+    return {
+      results: data.results,
+      hasMore: data.hasMore,
+    };
+  }, []);
+
+  const {
+    items: results,
+    loading,
+    hasMore,
+    stopped,
+    begin,
+    completeWithItems,
+    reset,
+    sentinelRef,
+  } = usePaginatedLoad({
+    fetchPage,
+    getItemId: (m) => m.imdbId,
+  });
 
   useEffect(() => {
     inputRef.current?.focus();
-    preloadPopularSearches();
   }, []);
 
-  const visibleResults = useMemo(
-    () => results.slice(0, visibleCount),
-    [results, visibleCount],
-  );
+  useEffect(() => {
+    if (!stopped || !activeQuery || !results.length) return;
+    completedQueryRef.current = activeQuery;
+    setSearchCache(activeQuery, { results, total: total || results.length });
+  }, [stopped, activeQuery, results, total]);
 
-  const runSearch = useCallback(async (q, { instant = false } = {}) => {
+  const clearSearch = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    activeQueryRef.current = '';
+    completedQueryRef.current = '';
+    setActiveQuery('');
+    setQuery('');
+    setTotal(0);
+    setError('');
+    setSuggestions([]);
+    setFromCache(false);
+    reset();
+  }, [reset]);
+
+  const launchSearch = useCallback(async (q) => {
     const trimmed = q.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      clearSearch();
+      return;
+    }
+
+    if (completedQueryRef.current === trimmed && activeQuery === trimmed && stopped) {
+      return;
+    }
 
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
+    setError('');
+    setFromCache(false);
+    setActiveQuery(trimmed);
+    activeQueryRef.current = trimmed;
+
     const cached = getSearchCache(trimmed);
-    if (cached) {
-      setResults(cached.results);
-      setTotal(cached.total);
+    if (cached?.results?.length) {
+      completedQueryRef.current = trimmed;
+      setTotal(cached.total ?? cached.results.length);
       setFromCache(true);
-      setError('');
-      setVisibleCount(PAGE_SIZE);
-      if (instant) setLoading(false);
-    } else if (!instant) {
-      setLoading(true);
-      setFromCache(false);
+      completeWithItems(cached.results);
+      return;
     }
+
+    completedQueryRef.current = '';
+    reset();
 
     try {
-      const { results: hits, total: count } = await searchMovies(trimmed, {
-        signal: controller.signal,
-        pages: 10,
-      });
-      if (controller.signal.aborted) return;
-
-      setResults(hits);
-      setTotal(count);
-      setFromCache(false);
-      setError('');
-      setVisibleCount(PAGE_SIZE);
+      await begin();
     } catch (err) {
       if (err.name === 'AbortError') return;
-      if (!cached) {
-        setResults([]);
-        setTotal(0);
-        setError('Search failed. Is the backend running on port 3001?');
-      }
-    } finally {
-      if (!controller.signal.aborted) setLoading(false);
+      setError('Search failed. Is the backend running on port 3001?');
     }
-  }, []);
+  }, [activeQuery, stopped, begin, completeWithItems, clearSearch, reset]);
 
   const handleChange = (e) => {
     const q = e.target.value;
     setQuery(q);
     clearTimeout(timerRef.current);
-    abortRef.current?.abort();
 
     if (!q.trim()) {
-      setResults([]);
-      setTotal(0);
-      setError('');
-      setSuggestions([]);
-      setLoading(false);
-      setFromCache(false);
+      clearSearch();
       return;
-    }
-
-    const cached = getSearchCache(q);
-    if (cached) {
-      setResults(cached.results);
-      setTotal(cached.total);
-      setFromCache(true);
-      setLoading(false);
-      setError('');
-    } else {
-      setLoading(true);
-      setFromCache(false);
     }
 
     setSuggestions(getSearchSuggestions(q));
 
-    timerRef.current = setTimeout(() => runSearch(q), DEBOUNCE_MS);
+    if (completedQueryRef.current === q.trim() && activeQuery === q.trim()) {
+      return;
+    }
+
+    const cached = getSearchCache(q);
+    if (cached?.results?.length && q.trim().length >= 2) {
+      timerRef.current = setTimeout(() => launchSearch(q), DEBOUNCE_MS);
+      return;
+    }
+
+    timerRef.current = setTimeout(() => launchSearch(q), DEBOUNCE_MS);
   };
 
   const handleSubmit = (e) => {
     e.preventDefault();
     clearTimeout(timerRef.current);
-    if (query.trim()) runSearch(query);
+    if (query.trim()) launchSearch(query);
   };
+
+  const initialLoading = loading && results.length === 0;
 
   return (
     <main className="search-page">
@@ -133,7 +170,7 @@ export default function SearchPage({ onPlay, onInfo, onHoverPreload }) {
         />
       </form>
 
-      {suggestions.length > 0 && query.length >= 2 && !loading && results.length === 0 && (
+      {suggestions.length > 0 && query.length >= 2 && !initialLoading && results.length === 0 && !activeQuery && (
         <div className="search-suggestions glass-dark">
           <p className="search-suggestions-label">From cache</p>
           <motion.div className="search-suggestions-row">
@@ -144,7 +181,7 @@ export default function SearchPage({ onPlay, onInfo, onHoverPreload }) {
                 className="search-suggestion-chip"
                 onClick={() => {
                   setQuery(m.title);
-                  runSearch(m.title, { instant: true });
+                  launchSearch(m.title);
                 }}
               >
                 {m.title}
@@ -154,16 +191,19 @@ export default function SearchPage({ onPlay, onInfo, onHoverPreload }) {
         </div>
       )}
 
-      {!loading && total > 0 && (
+      {!initialLoading && (total > 0 || results.length > 0) && (
         <p className="search-count">
-          {total} result{total !== 1 ? 's' : ''}
+          {total || results.length} result{(total || results.length) !== 1 ? 's' : ''}
           {fromCache && <span className="search-cache-badge"> · instant</span>}
+          {stopped && !fromCache && activeQuery && (
+            <span className="search-cache-badge"> · all loaded</span>
+          )}
         </p>
       )}
 
       {error && <p className="search-error">{error}</p>}
 
-      {loading && results.length === 0 && (
+      {initialLoading && (
         <motion.div className="search-grid" aria-busy="true" aria-label="Loading results">
           {Array.from({ length: 12 }).map((_, i) => (
             <div key={i} className="search-skeleton-card skeleton" />
@@ -172,40 +212,43 @@ export default function SearchPage({ onPlay, onInfo, onHoverPreload }) {
       )}
 
       {results.length > 0 && (
-        <>
-          <motion.div
-            className="search-grid search-grid-virtual"
-            initial={loading ? false : { opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.2 }}
-          >
-            {visibleResults.map((movie, i) => (
-              <MovieCard
-                key={movie.imdbId}
-                movie={movie}
-                index={i}
-                onPlay={onPlay}
-                onInfo={onInfo}
-                onHoverPreload={onHoverPreload}
-              />
-            ))}
-          </motion.div>
-
-          {visibleCount < results.length && (
-            <button
-              type="button"
-              className="btn-load-more glass-dark"
-              onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}
-            >
-              Show more ({results.length - visibleCount} remaining)
-            </button>
-          )}
-        </>
+        <motion.div
+          className="search-grid search-grid-virtual"
+          initial={false}
+          animate={{ opacity: 1 }}
+        >
+          {results.map((movie, i) => (
+            <MovieCard
+              key={movie.imdbId}
+              movie={movie}
+              index={i}
+              animate={false}
+              onPlay={onPlay}
+              onInfo={onInfo}
+            />
+          ))}
+        </motion.div>
       )}
 
-      {!loading && query && results.length === 0 && !error && (
+      {activeQuery && hasMore && !stopped && (
+        <div ref={sentinelRef} className="infinite-scroll-sentinel" aria-hidden />
+      )}
+
+      {loading && results.length > 0 && !stopped && (
+        <div className="infinite-scroll-loader" aria-busy="true">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="search-skeleton-card skeleton" />
+          ))}
+        </div>
+      )}
+
+      {stopped && results.length > 0 && (
+        <p className="search-end-label">All results loaded</p>
+      )}
+
+      {!loading && !initialLoading && activeQuery && results.length === 0 && !error && (
         <p style={{ color: 'var(--txt-muted)' }}>
-          No results for &quot;<strong style={{ color: '#fff' }}>{query}</strong>&quot;
+          No results for &quot;<strong style={{ color: '#fff' }}>{activeQuery}</strong>&quot;
         </p>
       )}
     </main>
