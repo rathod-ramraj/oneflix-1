@@ -1,4 +1,4 @@
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import { getBackdrop, getBackdropApiUrl, getPosterApiUrl, markBackdropFailed, PLACEHOLDER } from '../utils/api';
 
 export default function Hero({ movie, onPlay, onInfo }) {
@@ -21,61 +21,71 @@ export default function Hero({ movie, onPlay, onInfo }) {
 
   return (
     <section className="hero">
-      <div className="hero-slide">
-        <div className="hero-bg">
-          <img
-            className={`hero-bg-img${isTv ? ' hero-bg-img--tv' : ''}`}
-            src={heroBg}
-            alt=""
-            onError={(e) => {
-              const img = e.target;
-              if (backdropApi && !img.dataset.backdrop) {
-                img.dataset.backdrop = '1';
-                img.src = backdropApi;
-                return;
-              }
-              if (posterApi && !img.dataset.poster) {
-                img.dataset.poster = '1';
-                img.src = posterApi;
-                return;
-              }
-              if (movieId) markBackdropFailed(movieId);
-              if (img.src !== PLACEHOLDER) img.src = PLACEHOLDER;
-            }}
-          />
-        </div>
-        <div className="hero-gradient" />
-        <div className="hero-content">
-          <h1 className="hero-title">{title.toUpperCase()}</h1>
-          <div className="hero-meta">
-            {movie.year && <span>{movie.year}</span>}
-            {movie.rating && <span>⭐ {movie.rating}</span>}
-            {movie.runtime && <span>{movie.runtime}</span>}
-            {movie.genre && <span>{movie.genre.split(',')[0]}</span>}
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={movieId}
+          className="hero-slide"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.55 }}
+        >
+          <div className="hero-bg">
+            <img
+              className={`hero-bg-img${isTv ? ' hero-bg-img--tv' : ''}`}
+              src={heroBg}
+              alt=""
+              onError={(e) => {
+                const img = e.target;
+                if (backdropApi && !img.dataset.backdrop) {
+                  img.dataset.backdrop = '1';
+                  img.src = backdropApi;
+                  return;
+                }
+                if (posterApi && !img.dataset.poster) {
+                  img.dataset.poster = '1';
+                  img.src = posterApi;
+                  return;
+                }
+                if (movieId) markBackdropFailed(movieId);
+                if (img.src !== PLACEHOLDER) img.src = PLACEHOLDER;
+              }}
+            />
           </div>
-          {plot && <p className="hero-plot">{plot}</p>}
-          <div className="hero-actions">
-            <motion.button
-              type="button"
-              className="btn-play"
-              onClick={() => onPlay(movie)}
-              whileHover={{ scale: 1.04 }}
-              whileTap={{ scale: 0.97 }}
-            >
-              <PlayIcon /> Play
-            </motion.button>
-            <motion.button
-              type="button"
-              className="btn-info"
-              onClick={() => onInfo(movie)}
-              whileHover={{ scale: 1.04 }}
-              whileTap={{ scale: 0.97 }}
-            >
-              <InfoIcon /> More Info
-            </motion.button>
+          <div className="hero-gradient" />
+          <div className="hero-content">
+            <h1 className="hero-title">{title.toUpperCase()}</h1>
+            <div className="hero-meta">
+              {movie.year && <span>{movie.year}</span>}
+              {movie.rating && <span>⭐ {movie.rating}</span>}
+              {movie.runtime && <span>{movie.runtime}</span>}
+              {movie.genre && <span>{movie.genre.split(',')[0]}</span>}
+              {isTv && <span>Series</span>}
+            </div>
+            {plot && <p className="hero-plot">{plot}</p>}
+            <div className="hero-actions">
+              <motion.button
+                type="button"
+                className="btn-play"
+                onClick={() => onPlay(movie)}
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.97 }}
+              >
+                <PlayIcon /> Play
+              </motion.button>
+              <motion.button
+                type="button"
+                className="btn-info"
+                onClick={() => onInfo(movie)}
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.97 }}
+              >
+                <InfoIcon /> More Info
+              </motion.button>
+            </div>
           </div>
-        </div>
-      </div>
+        </motion.div>
+      </AnimatePresence>
     </section>
   );
 }

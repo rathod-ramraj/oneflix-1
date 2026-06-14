@@ -23,6 +23,50 @@ const PAGE = { HOME: 'home', SEARCH: 'search' };
 const HERO_EXCLUDE = (m) =>
   m?.imdbId === 'tt4154796' || /avengers:\s*endgame/i.test(m?.title || '');
 
+function parseYear(m) {
+  const match = String(m?.year || '').match(/\d{4}/);
+  return match ? parseInt(match[0], 10) : 0;
+}
+
+function buildHeroRotationPool(rows, data) {
+  const seen = new Set();
+  const pool = [];
+  const add = (m) => {
+    if (!m?.imdbId || seen.has(m.imdbId) || HERO_EXCLUDE(m)) return;
+    if (!m.poster && !m.backdrop) return;
+    seen.add(m.imdbId);
+    pool.push(m);
+  };
+
+  if (data?.hero) add(data.hero);
+  if (data?.heroes?.length) data.heroes.forEach(add);
+
+  const all = rows.flatMap((r) => r.movies || []);
+  const cutoff = new Date().getFullYear() - 2;
+
+  [...all]
+    .filter((m) => m.recent || parseYear(m) >= cutoff)
+    .sort((a, b) => {
+      if (a.recent && !b.recent) return -1;
+      if (b.recent && !a.recent) return 1;
+      return parseYear(b) - parseYear(a);
+    })
+    .forEach(add);
+
+  [...all]
+    .sort((a, b) => parseFloat(b.rating || 0) - parseFloat(a.rating || 0))
+    .forEach(add);
+
+  const movies = all.filter((m) => m.type === 'movie');
+  const tv = all.filter((m) => m.type === 'tv');
+  for (let i = 0; i < Math.max(movies.length, tv.length); i += 1) {
+    if (movies[i]) add(movies[i]);
+    if (tv[i]) add(tv[i]);
+  }
+
+  return pool.slice(0, 18);
+}
+
 function buildHeroPool(data) {
   const seen = new Set();
   const pool = [];
@@ -68,7 +112,11 @@ export default function App() {
   const [page, setPage] = useState(PAGE.HOME);
   const [navActive, setNavActive] = useState('home');
   const [rows, setRows] = useState(boot.rows);
-  const [heroMovie, setHeroMovie] = useState(boot.hero);
+  const [heroIndex, setHeroIndex] = useState(0);
+  const [homeMeta, setHomeMeta] = useState(() => {
+    const data = getHomeData();
+    return data ? { hero: data.hero, heroes: data.heroes } : null;
+  });
   const [modal, setModal] = useState(null);
   const [playerMovie, setPlayerMovie] = useState(null);
   const [playerSeason, setPlayerSeason] = useState(1);
@@ -89,12 +137,9 @@ export default function App() {
   const applyHomeData = useCallback((data) => {
     const list = Array.isArray(data?.rows) ? data.rows : [];
     if (!list.length) return;
-    const pool = buildHeroPool(data);
-    const fallbackHero = list.flatMap((r) => r.movies || []).find((m) => m?.imdbId && !HERO_EXCLUDE(m));
-    const hero = resolveHero(data, pool) || fallbackHero || null;
     persistHomeSnapshot(data);
     setRows(list);
-    if (hero) setHeroMovie(hero);
+    setHomeMeta({ hero: data.hero, heroes: data.heroes });
   }, []);
 
   useEffect(() => {
@@ -223,10 +268,29 @@ export default function App() {
     return filtered;
   }, [rows, filteredMovies, myList, selectedLanguage]);
 
+  const heroPool = useMemo(
+    () => buildHeroRotationPool(rows, homeMeta),
+    [rows, homeMeta],
+  );
+
+  useEffect(() => {
+    if (page !== PAGE.HOME || filteredMovies || heroPool.length < 2) return undefined;
+    const timer = setInterval(() => {
+      setHeroIndex((i) => (i + 1) % heroPool.length);
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [page, filteredMovies, heroPool.length]);
+
+  useEffect(() => {
+    setHeroIndex(0);
+  }, [heroPool.length]);
+
   const displayHero = useMemo(() => {
-    if (heroMovie) return heroMovie;
-    return rows.flatMap((r) => r.movies || []).find((m) => m?.imdbId && !HERO_EXCLUDE(m)) || null;
-  }, [heroMovie, rows]);
+    if (!heroPool.length) {
+      return rows.flatMap((r) => r.movies || []).find((m) => m?.imdbId && !HERO_EXCLUDE(m)) || null;
+    }
+    return heroPool[heroIndex % heroPool.length];
+  }, [heroPool, heroIndex, rows]);
 
   const browseContent = (
     <motion.div initial={false} animate={{ opacity: 1, y: 0 }}>
