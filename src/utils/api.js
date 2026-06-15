@@ -63,25 +63,55 @@ async function apiFetch(path, options = {}, retries = 2) {
 
 const posterFailCache = new Set();
 const backdropFailCache = new Set();
+const tmdbPosterFailCache = new Set();
+const tmdbBackdropFailCache = new Set();
+
+function isTmdbCdn(url) {
+  return Boolean(url && String(url).includes('image.tmdb.org'));
+}
+
+function tmdbImageKey(movie) {
+  const tmdbId = movie?.tmdbId;
+  if (!tmdbId) return null;
+  return `${movie?.type === 'tv' ? 'tv' : 'movie'}:${tmdbId}`;
+}
 
 export function getPosterApiUrl(movie) {
   const id = movie?.imdbId || movie?.imdbID;
-  if (!id || posterFailCache.has(id)) return null;
-  return `${API_PREFIX}/poster/${id}`;
+  if (id && !posterFailCache.has(id)) {
+    return `${API_PREFIX}/poster/${encodeURIComponent(id)}`;
+  }
+  const key = tmdbImageKey(movie);
+  if (key && !tmdbPosterFailCache.has(key)) {
+    const type = movie?.type === 'tv' ? 'tv' : 'movie';
+    return `${API_PREFIX}/poster/tmdb/${movie.tmdbId}?type=${type}`;
+  }
+  return null;
 }
 
 export function getBackdropApiUrl(movie) {
   const id = movie?.imdbId || movie?.imdbID;
-  if (!id || backdropFailCache.has(id)) return null;
-  return `${API_PREFIX}/backdrop/${id}`;
+  if (id && !backdropFailCache.has(id)) {
+    return `${API_PREFIX}/backdrop/${encodeURIComponent(id)}`;
+  }
+  const key = tmdbImageKey(movie);
+  if (key && !tmdbBackdropFailCache.has(key)) {
+    const type = movie?.type === 'tv' ? 'tv' : 'movie';
+    return `${API_PREFIX}/backdrop/tmdb/${movie.tmdbId}?type=${type}`;
+  }
+  return null;
 }
 
-export function markPosterFailed(id) {
+export function markPosterFailed(id, movie) {
   if (id) posterFailCache.add(String(id));
+  const key = tmdbImageKey(movie);
+  if (key) tmdbPosterFailCache.add(key);
 }
 
-export function markBackdropFailed(id) {
+export function markBackdropFailed(id, movie) {
   if (id) backdropFailCache.add(String(id));
+  const key = tmdbImageKey(movie);
+  if (key) tmdbBackdropFailCache.add(key);
 }
 
 function isGenericPlaceholder(url) {
@@ -91,14 +121,26 @@ function isGenericPlaceholder(url) {
 export function getPoster(movie) {
   const local = upgradePosterUrl(movie?.poster || movie?.Poster || movie?.primaryImage?.url);
   if (local && String(local).startsWith('/')) return local;
+  if (isTmdbCdn(local) && !isGenericPlaceholder(local)) return local;
+
+  const api = getPosterApiUrl(movie);
+  if (api) return api;
+
   if (isDirectImageUrl(local) && !isGenericPlaceholder(local)) return local;
   return PLACEHOLDER;
 }
 
 export function getBackdrop(movie) {
   const resolved = upgradeBackdropUrl(movie?.backdrop || movie?.Backdrop);
-  if (isDirectImageUrl(resolved) && !isGenericPlaceholder(resolved)) return resolved;
+  if (isTmdbCdn(resolved) && !isGenericPlaceholder(resolved)) return resolved;
+
+  const api = getBackdropApiUrl(movie);
+  if (api) return api;
+
   const poster = upgradePosterUrl(movie?.poster || movie?.Poster || movie?.primaryImage?.url);
+  if (isTmdbCdn(poster) && !isGenericPlaceholder(poster)) return poster;
+
+  if (isDirectImageUrl(resolved) && !isGenericPlaceholder(resolved)) return resolved;
   if (isDirectImageUrl(poster) && !isGenericPlaceholder(poster)) return poster;
   return PLACEHOLDER;
 }

@@ -53,7 +53,7 @@ export default function MovieCard({
               img.src = apiUrl;
               return;
             }
-            if (id) markPosterFailed(id);
+            if (id || movie?.tmdbId) markPosterFailed(id, movie);
             if (img.src !== PLACEHOLDER) img.src = PLACEHOLDER;
           }}
         />

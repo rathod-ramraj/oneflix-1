@@ -255,7 +255,7 @@ async function fillFromImdbBackdrop(movie) {
   return upgradeBackdropUrl(imdbBg) || imdbBg || null;
 }
 
-async function resolveFallbackImages(movie, { tmdbKey, omdbKey }) {
+async function resolveFallbackImages(movie, { tmdbKey, omdbKey, skipCatalog = false } = {}) {
   const state = {
     tmdbId: movie.tmdbId || null,
     type: movie.type || 'movie',
@@ -264,12 +264,14 @@ async function resolveFallbackImages(movie, { tmdbKey, omdbKey }) {
   let poster = null;
   let backdrop = null;
 
-  const catPoster = catalogPoster(movie);
-  if (catPoster && !isPlaceholderImage(catPoster) && await probeImageUrl(catPoster)) {
-    poster = catPoster;
+  if (!skipCatalog) {
+    const catPoster = catalogPoster(movie);
+    if (catPoster && !isPlaceholderImage(catPoster) && await probeImageUrl(catPoster)) {
+      poster = catPoster;
+    }
+    const catBg = catalogBackdrop(movie, poster);
+    if (catBg && await probeImageUrl(catBg)) backdrop = catBg;
   }
-  const catBg = catalogBackdrop(movie, poster);
-  if (catBg && await probeImageUrl(catBg)) backdrop = catBg;
 
   for (const provider of pickProviderChain(movie)) {
     if (needsPoster(poster)) {
@@ -325,7 +327,7 @@ async function resolveFallbackImages(movie, { tmdbKey, omdbKey }) {
 }
 
 /** Resolve best poster + backdrop for one title */
-export async function resolveImages(movie, { tmdbKey = '', omdbKey = '', unsplashKey = '', unsplashKeys = null, skipUnsplash = false } = {}) {
+export async function resolveImages(movie, { tmdbKey = '', omdbKey = '', unsplashKey = '', unsplashKeys = null, skipUnsplash = false, skipCatalog = false } = {}) {
   if (!movie) return movie;
   const cacheKey = movie.imdbId || String(movie.tmdbId) || movie.title;
   if (!cacheKey) return movie;
@@ -337,7 +339,7 @@ export async function resolveImages(movie, { tmdbKey = '', omdbKey = '', unsplas
     }
   }
 
-  const fallback = await resolveFallbackImages(movie, { tmdbKey, omdbKey });
+  const fallback = await resolveFallbackImages(movie, { tmdbKey, omdbKey, skipCatalog });
   let poster = fallback.poster;
   let backdrop = fallback.backdrop;
 

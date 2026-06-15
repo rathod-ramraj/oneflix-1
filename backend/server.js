@@ -398,7 +398,9 @@ async function buildRowsPayload() {
   const topTv = mergeUniqueRows(daily.topRatedTv || [], tvShows, 12);
 
   const dailyHeroes = (daily.heroPool || []).filter((m) => !isHeroExcluded(m) && hasValidImage(m));
-  const localHeroPool = buildHeroPool(seed).filter((m) => !dailyHeroes.some((d) => d.imdbId === m.imdbId));
+  const localHeroPool = buildHeroPool(seed).filter(
+    (m) => !dailyHeroes.some((d) => (d.imdbId && d.imdbId === m.imdbId) || (d.tmdbId && d.tmdbId === m.tmdbId)),
+  );
   const heroPool = [...dailyHeroes, ...localHeroPool].slice(0, 18);
   const hero = heroPool[0] || catalog[0] || null;
 
@@ -473,9 +475,17 @@ async function pickRedirectUrl(primary, fallbacks = []) {
   return PLACEHOLDER;
 }
 
-async function resolveForId(id, { skipUnsplash = false } = {}) {
-  const movie = findLocalMovie(id) || { imdbId: id.startsWith('tt') ? id : null, tmdbId: id };
-  return resolveImages(movie, { ...imageOpts(), skipUnsplash });
+async function resolveForId(id, { skipUnsplash = false, skipCatalog = true, type = 'movie' } = {}) {
+  let movie = findLocalMovie(id);
+  if (!movie) {
+    const sid = String(id);
+    if (sid.startsWith('tt')) movie = { imdbId: sid };
+    else if (/^\d+$/.test(sid)) movie = { tmdbId: Number(sid), type };
+    else movie = { imdbId: sid };
+  } else if (skipCatalog) {
+    movie = { ...movie, poster: undefined, backdrop: undefined };
+  }
+  return resolveImages(movie, { ...imageOpts(), skipUnsplash, skipCatalog });
 }
 
 app.get('/api/poster/:id', async (req, res) => {
@@ -486,7 +496,26 @@ app.get('/api/poster/:id', async (req, res) => {
     return res.redirect(302, hit.url);
   }
   if (hit) redirectCache.delete(key);
-  const enriched = await resolveForId(id, { skipUnsplash: true });
+  const enriched = await resolveForId(id, { skipUnsplash: true, skipCatalog: true });
+  const url = await pickRedirectUrl(enriched.poster);
+  if (url !== PLACEHOLDER) redirectCache.set(key, { url, at: Date.now() });
+  res.set('Cache-Control', 'public, max-age=43200');
+  res.redirect(302, url);
+});
+
+app.get('/api/poster/tmdb/:tmdbId', async (req, res) => {
+  const tmdbId = req.params.tmdbId;
+  const type = req.query.type === 'tv' ? 'tv' : 'movie';
+  const key = `pt:${type}:${tmdbId}`;
+  const hit = redirectCache.get(key);
+  if (hit && Date.now() - hit.at < 1000 * 60 * 60 * 12 && await probeImageUrl(hit.url)) {
+    return res.redirect(302, hit.url);
+  }
+  if (hit) redirectCache.delete(key);
+  const enriched = await resolveImages(
+    { tmdbId: Number(tmdbId), type },
+    { ...imageOpts(), skipUnsplash: true, skipCatalog: true },
+  );
   const url = await pickRedirectUrl(enriched.poster);
   if (url !== PLACEHOLDER) redirectCache.set(key, { url, at: Date.now() });
   res.set('Cache-Control', 'public, max-age=43200');
@@ -501,7 +530,26 @@ app.get('/api/backdrop/:id', async (req, res) => {
     return res.redirect(302, hit.url);
   }
   if (hit) redirectCache.delete(key);
-  const enriched = await resolveForId(id, { skipUnsplash: true });
+  const enriched = await resolveForId(id, { skipUnsplash: true, skipCatalog: true });
+  const url = await pickRedirectUrl(enriched.backdrop, [enriched.poster]);
+  if (url !== PLACEHOLDER) redirectCache.set(key, { url, at: Date.now() });
+  res.set('Cache-Control', 'public, max-age=43200');
+  res.redirect(302, url);
+});
+
+app.get('/api/backdrop/tmdb/:tmdbId', async (req, res) => {
+  const tmdbId = req.params.tmdbId;
+  const type = req.query.type === 'tv' ? 'tv' : 'movie';
+  const key = `bt:${type}:${tmdbId}`;
+  const hit = redirectCache.get(key);
+  if (hit && Date.now() - hit.at < 1000 * 60 * 60 * 12 && await probeImageUrl(hit.url)) {
+    return res.redirect(302, hit.url);
+  }
+  if (hit) redirectCache.delete(key);
+  const enriched = await resolveImages(
+    { tmdbId: Number(tmdbId), type },
+    { ...imageOpts(), skipUnsplash: true, skipCatalog: true },
+  );
   const url = await pickRedirectUrl(enriched.backdrop, [enriched.poster]);
   if (url !== PLACEHOLDER) redirectCache.set(key, { url, at: Date.now() });
   res.set('Cache-Control', 'public, max-age=43200');

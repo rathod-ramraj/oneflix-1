@@ -160,8 +160,7 @@ export default function App() {
   useEffect(() => {
     const dayMs = 24 * 60 * 60 * 1000;
     const refreshDaily = () => {
-      resetHomeBootstrap();
-      loadHomeOnce()
+      loadHomeOnce({ fresh: true })
         .then((data) => { if (data?.rows?.length) applyHomeData(data); })
         .catch(() => {});
     };
@@ -171,11 +170,15 @@ export default function App() {
       next.setHours(24, 0, 5, 0);
       return next - now;
     };
+    let dailyTimer = null;
     const midnightTimer = setTimeout(() => {
       refreshDaily();
-      setInterval(refreshDaily, dayMs);
+      dailyTimer = setInterval(refreshDaily, dayMs);
     }, msUntilMidnight());
-    return () => clearTimeout(midnightTimer);
+    return () => {
+      clearTimeout(midnightTimer);
+      if (dailyTimer) clearInterval(dailyTimer);
+    };
   }, [applyHomeData]);
 
   useEffect(() => {

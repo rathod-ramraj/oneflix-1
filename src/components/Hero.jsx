@@ -47,7 +47,7 @@ export default function Hero({ movie, onPlay, onInfo }) {
                   img.src = posterApi;
                   return;
                 }
-                if (movieId) markBackdropFailed(movieId);
+                if (movieId || movie?.tmdbId) markBackdropFailed(movieId, movie);
                 if (img.src !== PLACEHOLDER) img.src = PLACEHOLDER;
               }}
             />

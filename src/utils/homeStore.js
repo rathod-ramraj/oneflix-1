@@ -135,14 +135,14 @@ export function clearBootAttempted() {
 }
 
 /** Fetch home catalog once — never refetches after success */
-export function loadHomeOnce() {
+export function loadHomeOnce({ fresh = false } = {}) {
   getHomeData();
-  if (frozen && memory?.rows?.length) return Promise.resolve(memory);
+  if (!fresh && frozen && memory?.rows?.length) return Promise.resolve(memory);
   if (inflight) return inflight;
 
   bootAttempted = true;
 
-  inflight = fetchRows()
+  inflight = fetchRows({ fresh })
     .then((data) => {
       if (data?.rows?.length) persistHomeSnapshot(data);
       return data;
