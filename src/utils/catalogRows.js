@@ -8,17 +8,12 @@ export function buildClientRows(movies) {
   const hero = movies.find((m) => m.featured) || movies[0];
   const heroes = (recent.length ? recent : movies).slice(0, 12);
   const rows = [
+    { id: 'latest-movies', title: 'Latest Movies', movies: featureFilms.slice(0, 12) },
+    { id: 'latest-tv', title: 'Latest Series', movies: tvShows.slice(0, 12) },
+    { id: 'top-movies', title: 'Top Rated Movies', variant: 'top10', movies: [...featureFilms].sort((a, b) => parseFloat(b.rating || 0) - parseFloat(a.rating || 0)).slice(0, 10) },
+    { id: 'top-tv', title: 'Top Rated Series', movies: tvShows.slice(0, 12) },
     { id: 'trending', title: 'Trending Now', movies: featureFilms.slice(0, 12) },
-    { id: 'tv', title: 'Popular TV Shows', movies: tvShows.slice(0, 12) },
     { id: 'recent', title: 'Recently Added', movies: (recent.length ? recent : featureFilms).slice(0, 10) },
-    {
-      id: 'top10',
-      title: 'Top 10 Movies Today',
-      variant: 'top10',
-      movies: [...featureFilms]
-        .sort((a, b) => parseFloat(b.rating || 0) - parseFloat(a.rating || 0))
-        .slice(0, 8),
-    },
   ].filter((r) => r.movies.length);
   return { hero, heroes, rows };
 }

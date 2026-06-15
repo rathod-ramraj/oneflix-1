@@ -32,14 +32,21 @@ function buildHeroRotationPool(rows, data) {
   const seen = new Set();
   const pool = [];
   const add = (m) => {
-    if (!m?.imdbId || seen.has(m.imdbId) || HERO_EXCLUDE(m)) return;
+    const key = m?.imdbId || (m?.tmdbId != null ? `tmdb:${m.tmdbId}` : null);
+    if (!key || seen.has(key) || HERO_EXCLUDE(m)) return;
     if (!m.poster && !m.backdrop) return;
-    seen.add(m.imdbId);
+    seen.add(key);
     pool.push(m);
   };
 
   if (data?.hero) add(data.hero);
   if (data?.heroes?.length) data.heroes.forEach(add);
+
+  const priorityIds = ['latest-movies', 'latest-tv', 'top-movies', 'top-tv'];
+  for (const id of priorityIds) {
+    const row = rows.find((r) => r.id === id);
+    row?.movies?.forEach(add);
+  }
 
   const all = rows.flatMap((r) => r.movies || []);
   const cutoff = new Date().getFullYear() - 2;
@@ -148,6 +155,27 @@ export default function App() {
         if (data?.rows?.length) applyHomeData(data);
       })
       .catch(() => {});
+  }, [applyHomeData]);
+
+  useEffect(() => {
+    const dayMs = 24 * 60 * 60 * 1000;
+    const refreshDaily = () => {
+      resetHomeBootstrap();
+      loadHomeOnce()
+        .then((data) => { if (data?.rows?.length) applyHomeData(data); })
+        .catch(() => {});
+    };
+    const msUntilMidnight = () => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setHours(24, 0, 5, 0);
+      return next - now;
+    };
+    const midnightTimer = setTimeout(() => {
+      refreshDaily();
+      setInterval(refreshDaily, dayMs);
+    }, msUntilMidnight());
+    return () => clearTimeout(midnightTimer);
   }, [applyHomeData]);
 
   useEffect(() => {
@@ -260,10 +288,10 @@ export default function App() {
       .filter((row) => row.movies.length > 0);
 
     if (filteredMovies === 'tv') {
-      return [...filtered].sort((a, b) => (a.id === 'tv' ? -1 : b.id === 'tv' ? 1 : 0));
+      return [...filtered].sort((a, b) => (a.id === 'latest-tv' || a.id === 'tv' ? -1 : b.id === 'latest-tv' || b.id === 'tv' ? 1 : 0));
     }
     if (filteredMovies === 'movie') {
-      return [...filtered].sort((a, b) => (a.id === 'top10' || a.id === 'toprated' ? -1 : 0));
+      return [...filtered].sort((a, b) => (a.id === 'latest-movies' || a.id === 'top-movies' || a.id === 'top10' ? -1 : 0));
     }
     return filtered;
   }, [rows, filteredMovies, myList, selectedLanguage]);

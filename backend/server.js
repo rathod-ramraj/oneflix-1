@@ -23,6 +23,7 @@ import { buildStreamProviders, ALLOWED_EMBED_HOSTS, probeProviderUrl, isAllowedP
 import { isBotRequest, BOT_BLOCK_MESSAGE } from './botGuard.js';
 import { fetchYoutubeTrailer } from './youtubeService.js';
 import { configureUnsplashKeys } from './unsplashService.js';
+import { getDailyCatalog, warmDailyCatalog } from './dailyCatalog.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -78,6 +79,7 @@ function loadMovies() {
 }
 
 loadMovies();
+warmDailyCatalog(TMDB_API_KEY);
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
 const allowedOrigins = [
@@ -364,8 +366,21 @@ function genreMovies(genreNeedle, type = 'movie') {
 let rowsPayloadCache = { data: null, at: 0 };
 const ROWS_API_CACHE_MS = 5 * 60_000;
 
-function buildRowsPayload() {
+function mergeUniqueRows(primary, fallback, limit) {
+  const seen = new Set(primary.map((m) => m.imdbId || `tmdb:${m.tmdbId}`));
+  const out = [...primary];
+  for (const m of fallback) {
+    const key = m.imdbId || `tmdb:${m.tmdbId}`;
+    if (seen.has(key) || out.length >= limit) continue;
+    seen.add(key);
+    out.push(m);
+  }
+  return out.slice(0, limit);
+}
+
+async function buildRowsPayload() {
   loadMovies();
+  const daily = await getDailyCatalog(TMDB_API_KEY);
   const seed = rotateSeed();
   const catalog = activeCatalog();
   const featureFilms = catalog.filter((m) => m.type === 'movie');
@@ -375,26 +390,44 @@ function buildRowsPayload() {
       (m.title || '').includes(k)
     )
   );
-  const heroPool = buildHeroPool(seed);
+  const topRatedLocal = [...featureFilms].sort((a, b) => parseFloat(b.rating || 0) - parseFloat(a.rating || 0));
+
+  const latestMovies = mergeUniqueRows(daily.latestMovies || [], featureFilms, 14);
+  const latestTv = mergeUniqueRows(daily.latestTv || [], tvShows, 14);
+  const topMovies = mergeUniqueRows(daily.topRatedMovies || [], topRatedLocal, 12);
+  const topTv = mergeUniqueRows(daily.topRatedTv || [], tvShows, 12);
+
+  const dailyHeroes = (daily.heroPool || []).filter((m) => !isHeroExcluded(m) && hasValidImage(m));
+  const localHeroPool = buildHeroPool(seed).filter((m) => !dailyHeroes.some((d) => d.imdbId === m.imdbId));
+  const heroPool = [...dailyHeroes, ...localHeroPool].slice(0, 18);
   const hero = heroPool[0] || catalog[0] || null;
-  const topRated = [...featureFilms].sort((a, b) => parseFloat(b.rating || 0) - parseFloat(a.rating || 0));
 
   const rows = [
-    { id: 'top10', title: 'Top 10 Movies Today', variant: 'top10', movies: pickMovies(featureFilms, 8, seed + 10) },
-    { id: 'trending', title: 'Trending Now', movies: pickMovies(featureFilms, 12, seed + 20) },
-    { id: 'toprated', title: 'Top Rated Movies', movies: pickMovies(topRated, 12, seed + 30) },
+    { id: 'latest-movies', title: 'Latest Movies', movies: latestMovies },
+    { id: 'latest-tv', title: 'Latest Series', movies: latestTv },
+    { id: 'top-movies', title: 'Top Rated Movies', variant: 'top10', movies: topMovies.slice(0, 10) },
+    { id: 'top-tv', title: 'Top Rated Series', movies: topTv },
+    { id: 'trending', title: 'Trending Now', movies: pickMovies(latestMovies.length ? latestMovies : featureFilms, 12, seed + 20) },
     { id: 'indian', title: 'Indian Blockbusters', movies: pickMovies(indianPool.length ? indianPool : featureFilms, 10, seed + 40) },
-    { id: 'tv', title: 'Popular TV Shows', movies: pickMovies(tvShows, 12, seed + 50) },
     { id: 'recent', title: 'Recently Added', movies: pickMovies(movies.filter((m) => m.recent).length ? movies.filter((m) => m.recent) : featureFilms, 10, seed + 60) },
     { id: 'action', title: 'Action & Thrillers', movies: pickMovies(genreMovies('action').length ? genreMovies('action') : featureFilms, 10, seed + 100) },
-    { id: 'binge', title: 'Binge-Worthy Series', movies: pickMovies(tvShows, 12, seed + 180) },
-  ];
+    { id: 'binge', title: 'Binge-Worthy Series', movies: pickMovies(latestTv.length ? latestTv : tvShows, 12, seed + 180) },
+  ].filter((r) => r.movies?.length);
 
-  return { hero, heroes: heroPool, rows };
+  return {
+    hero,
+    heroes: heroPool,
+    rows,
+    dailyUpdated: daily.date || null,
+  };
 }
 
 try {
-  rowsPayloadCache = { data: buildRowsPayload(), at: Date.now() };
+  buildRowsPayload().then((data) => {
+    rowsPayloadCache = { data, at: Date.now() };
+  }).catch((err) => {
+    console.warn('[rows] startup warm cache failed:', err?.message);
+  });
 } catch (err) {
   console.warn('[rows] startup warm cache failed:', err?.message);
 }
@@ -407,7 +440,7 @@ app.get('/api/rows', async (_req, res) => {
       return res.json(rowsPayloadCache.data);
     }
 
-    const payload = buildRowsPayload();
+    const payload = await buildRowsPayload();
     rowsPayloadCache = { data: payload, at: now };
     res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
     res.json(payload);
